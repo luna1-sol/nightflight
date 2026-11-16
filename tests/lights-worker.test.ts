@@ -2,9 +2,11 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { createLightProcessor } from "../src/lights-worker.ts";
 import { visibilityFor } from "../src/light-geometry.ts";
+import type { GeoFeature, LightRequest, LightView, LngLat } from "../src/types.ts";
+import { lineString, succeeded } from "./fixtures.ts";
 
-const center = [139.7, 35.6];
-const view = {
+const center: LngLat = [139.7, 35.6];
+const view: LightView = {
   position: { lon: center[0], lat: center[1] },
   width: 1200,
   height: 800,
@@ -13,19 +15,17 @@ const view = {
   roll: 0,
 };
 // An east-west primary road crossing the given latitude near the aircraft.
-const road = (lat) => ({
-  geometry: {
-    type: "LineString",
-    coordinates: [
+const road = (lat: number) =>
+  lineString(
+    [
       [center[0] - 0.05, lat],
       [center[0] + 0.05, lat],
     ],
-  },
-  properties: { class: "primary" },
-});
+    { class: "primary" },
+  );
 const ahead = road(center[1] + 0.25),
   behind = road(center[1] - 0.08);
-const message = (overrides = {}) => ({
+const message = (overrides: Partial<LightRequest> = {}): LightRequest => ({
   id: 1,
   epoch: 0,
   areas: [],
@@ -35,6 +35,11 @@ const message = (overrides = {}) => ({
   view,
   ...overrides,
 });
+// A processor whose replies are checked to be successes, not error replies.
+const processor = () => {
+  const process = createLightProcessor();
+  return (request: LightRequest) => succeeded(process(request));
+};
 
 test("the test roads sit in front of and behind the camera", () => {
   const visible = visibilityFor(view);
@@ -43,7 +48,7 @@ test("the test roads sit in front of and behind the camera", () => {
 });
 
 test("lights outside the view are generated so looking around shows them at once", () => {
-  const result = createLightProcessor()(message());
+  const result = processor()(message());
   const lats = result.diff.add.map((f) => f.geometry.coordinates[1]);
   assert.ok(lats.some((lat) => lat > center[1]), "lights ahead");
   assert.ok(lats.some((lat) => lat < center[1]), "lights behind");
@@ -51,9 +56,9 @@ test("lights outside the view are generated so looking around shows them at once
 });
 
 test("visible lights get the budget first, then the nearest hidden ones", () => {
-  const full = createLightProcessor()(message()),
+  const full = processor()(message()),
     budget = full.visible + 5,
-    result = createLightProcessor()(message({ maxPoints: budget }));
+    result = processor()(message({ maxPoints: budget }));
   assert.equal(result.count, budget);
   const visible = visibilityFor(view),
     shown = result.diff.add.filter((f) => visible(f.geometry.coordinates));
@@ -61,7 +66,7 @@ test("visible lights get the budget first, then the nearest hidden ones", () => 
 });
 
 test("results are diffs against the previous result", () => {
-  const process = createLightProcessor(),
+  const process = processor(),
     first = process(message());
   assert.ok(first.diff.add.length > 0);
   assert.deepEqual(first.diff.remove, []);
@@ -92,22 +97,20 @@ test("minor roads fade out smoothly with distance, and leave once far away", asy
   assert.ok(fadeAt("minor", 9000) > 0 && fadeAt("minor", 9000) < 1);
   assert.equal(fadeAt("minor", 20000), 0);
 
-  const minor = (lat) => ({
-    geometry: {
-      type: "LineString",
-      coordinates: [
+  const minor = (lat: number) =>
+    lineString(
+      [
         [center[0] - 0.03, lat],
         [center[0] + 0.03, lat],
       ],
-    },
-    properties: { class: "minor" },
-  });
-  const process = createLightProcessor(),
+      { class: "minor" },
+    );
+  const process = processor(),
     near = minor(center[1] + 0.01), // ~1 km
     mid = minor(center[1] + 0.08), // ~9 km
     far = minor(center[1] + 0.2); // ~22 km
-  const count = (road) =>
-    createLightProcessor()(message({ roads: [road] })).count;
+  const count = (road: GeoFeature) =>
+    processor()(message({ roads: [road] })).count;
   assert.ok(count(near) > count(mid), "fewer lamps on mid-distance minor roads");
   assert.equal(count(far), 0, "none beyond the fade");
 
@@ -123,20 +126,19 @@ test("an over-budget road network is thinned evenly, never cut off road by road"
   const { roadLights } = await import("../src/light-geometry.ts");
   // Ten long parallel roads; a budget of half their lamps must leave lamps on
   // every road (the old early stop kept the first roads whole, dropped the rest).
-  const roads = Array.from({ length: 10 }, (_, i) => ({
-    geometry: {
-      type: "LineString",
-      coordinates: [
+  const roads = Array.from({ length: 10 }, (_, i) =>
+    lineString(
+      [
         [139.0, 35 + i * 0.05],
         [139.5, 35 + i * 0.05],
       ],
-    },
-    properties: { class: "primary" },
-  }));
+      { class: "primary" },
+    ),
+  );
   const all = roadLights(roads, Infinity),
     half = roadLights(roads, Math.floor(all.length / 2));
   assert.equal(half.length, Math.floor(all.length / 2));
-  const perRoad = new Map();
+  const perRoad = new Map<number, number>();
   for (const lamp of half) {
     const row = Math.round((lamp.geometry.coordinates[1] - 35) / 0.05);
     perRoad.set(row, (perRoad.get(row) || 0) + 1);

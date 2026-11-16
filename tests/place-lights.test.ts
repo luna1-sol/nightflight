@@ -1,26 +1,31 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { insidePolygon, createPlaceLights } from "../src/place-lights.ts";
-const outer = [
+import type { GeoFeature, LngLat } from "../src/types.ts";
+import { polygon } from "./fixtures.ts";
+const outer: LngLat[] = [
   [139, 35],
   [139.04, 35],
   [139.04, 35.04],
   [139, 35.04],
   [139, 35],
 ];
-const hole = [
+const hole: LngLat[] = [
   [139.015, 35.015],
   [139.025, 35.015],
   [139.025, 35.025],
   [139.015, 35.025],
   [139.015, 35.015],
 ];
-const area = {
+const area: GeoFeature & { type: "Feature" } = {
   type: "Feature",
   properties: { class: "residential" },
   geometry: { type: "Polygon", coordinates: [outer, hole] },
 };
-const options = { center: [139.02, 35.02], maxPoints: 200 };
+const options = { center: [139.02, 35.02], maxPoints: 200 } satisfies {
+  center: LngLat;
+  maxPoints: number;
+};
 test("neighborhood light points stay within mapped polygons and out of holes", () => {
   const result = createPlaceLights([area], options);
   assert.ok(result.features.length > 20);
@@ -66,15 +71,12 @@ test("empty, non-polygon, and faraway data produce no local light points", () =>
 test("tile clipping never changes which lights exist (no tile-shaped density edges)", () => {
   // The same neighbourhood, whole and cut into the four pieces vector tiles
   // would deliver, must light up identically: density depends on distance only.
-  const square = (x0, y0, x1, y1) => ({
-    properties: { class: "residential" },
-    geometry: {
-      type: "Polygon",
-      coordinates: [[[x0, y0], [x1, y0], [x1, y1], [x0, y1], [x0, y0]]],
-    },
-  });
-  for (const center of [[139.02, 35.02], [139.3, 35.02]]) {
-    const ids = (areas) =>
+  const square = (x0: number, y0: number, x1: number, y1: number) =>
+    polygon([[[x0, y0], [x1, y0], [x1, y1], [x0, y1], [x0, y0]]], {
+      class: "residential",
+    });
+  for (const center of [[139.02, 35.02], [139.3, 35.02]] satisfies LngLat[]) {
+    const ids = (areas: GeoFeature[]) =>
       createPlaceLights(areas, { center, maxPoints: 1e6 })
         .features.map((f) => f.id)
         .sort();

@@ -6,16 +6,14 @@ import {
   keepLightsLayerAttached,
   FLOATS,
 } from "../src/night-lights-layer.ts";
-
-const light = (id, kind, lon, lat) => ({
-  type: "Feature",
-  id,
-  geometry: { type: "Point", coordinates: [lon, lat] },
-  properties: { kind, color: "#ff8000", radius: 0.8, opacity: 0.5 },
-});
+import type {
+  CustomLayerInterface,
+  CustomRenderMethodInput,
+} from "maplibre-gl";
+import { asMap, light } from "./fixtures.ts";
 
 test("packs buildings before roads, relative to the centre, across the date line", () => {
-  const center = [1, 0.5]; // mercator x = 1 is longitude 180
+  const center: [number, number] = [1, 0.5]; // mercator x = 1 is longitude 180
   const packed = packLights(
     [light("r", "road", -179.9, 0), light("b", "building", 179.9, 0)],
     center,
@@ -56,41 +54,67 @@ test("new lights fade in from their first appearance; updates keep their age", (
   assert.equal(packed.data[7], 500);
 });
 
-function fakeGl() {
+interface Handle {
+  id: number;
+}
+interface FakeGl {
+  uploads: number[];
+  draws: number;
+  alive: Set<Handle>;
+}
+// Hands the fake to code that expects a real WebGL2 context.
+const asGl = (gl: FakeGl) => gl as unknown as WebGL2RenderingContext;
+
+function fakeGl(): FakeGl {
   let next = 1;
-  const alive = new Set(),
-    make = () => {
+  const alive = new Set<Handle>(),
+    make = (): Handle => {
       const handle = { id: next++ };
       alive.add(handle);
       return handle;
     },
     gl = {
-      uploads: [],
+      uploads: [] as number[],
       draws: 0,
       alive,
       createProgram: make,
       createBuffer: make,
       createShader: make,
-      deleteProgram: (h) => alive.delete(h),
-      deleteBuffer: (h) => alive.delete(h),
-      deleteShader: (h) => alive.delete(h),
-      isProgram: (h) => alive.has(h),
-      isBuffer: (h) => alive.has(h),
+      deleteProgram: (h: Handle) => alive.delete(h),
+      deleteBuffer: (h: Handle) => alive.delete(h),
+      deleteShader: (h: Handle) => alive.delete(h),
+      isProgram: (h: Handle) => alive.has(h),
+      isBuffer: (h: Handle) => alive.has(h),
       getShaderParameter: () => true,
       getProgramParameter: () => true,
       getAttribLocation: () => 0,
       getUniformLocation: () => ({}),
-      bufferData: (_, data) => gl.uploads.push(data.length),
+      bufferData: (_: unknown, data: ArrayLike<number>) => gl.uploads.push(data.length),
       drawArrays: () => gl.draws++,
     };
   return new Proxy(gl, {
-    get: (target, key) => (key in target ? target[key] : () => {}),
+    get: (target, key) =>
+      key in target ? target[key as keyof typeof target] : () => {},
   });
 }
 // Enough of a MapLibre map to replay what a context restore does to a style.
-function fakeMap(gl) {
-  const handlers = {},
-    map = {
+interface FakeMap {
+  layers: Map<string, CustomLayerInterface>;
+  visibility: Record<string, unknown>;
+  beforeId?: string;
+  on(event: string, fn: () => void): FakeMap;
+  fire(event: string): void;
+  getLayer(id: string): CustomLayerInterface | undefined;
+  addLayer(layer: CustomLayerInterface, beforeId?: string): void;
+  setLayoutProperty(id: string, key: string, value: unknown): void;
+  getCenter(): { lng: number; lat: number };
+  getPixelRatio(): number;
+  getZoom(): number;
+  triggerRepaint(): void;
+}
+function fakeMap(gl: FakeGl): FakeMap {
+  const handlers: Record<string, (() => void)[]> = {},
+    map: FakeMap = {
       layers: new Map(),
       visibility: {},
       on: (event, fn) => ((handlers[event] ??= []).push(fn), map),
@@ -99,7 +123,7 @@ function fakeMap(gl) {
       addLayer: (layer, beforeId) => {
         map.beforeId = beforeId;
         map.layers.set(layer.id, layer);
-        layer.onAdd(map, gl);
+        layer.onAdd!(asMap(map), asGl(gl));
       },
       setLayoutProperty: (id, key, value) => (map.visibility[id] = value),
       getCenter: () => ({ lng: 0, lat: 0 }),
@@ -109,20 +133,22 @@ function fakeMap(gl) {
     };
   return map;
 }
-const renderInput = { modelViewProjectionMatrix: new Float64Array(16) };
+const renderInput = {
+  modelViewProjectionMatrix: new Float64Array(16),
+} as unknown as CustomRenderMethodInput;
 
 test("the layer returns after a WebGL context restore, with its lights", () => {
   const gl = fakeGl(),
     map = fakeMap(gl),
     layer = createLightsLayer();
-  keepLightsLayerAttached(map, layer, { beforeId: "overview-borders" });
+  keepLightsLayerAttached(asMap(map), layer, { beforeId: "overview-borders" });
   assert.equal(map.getLayer(layer.id), undefined, "waits for the style");
 
   map.fire("style.load");
   assert.equal(map.getLayer(layer.id), layer);
   assert.equal(map.beforeId, "overview-borders");
   layer.applyDiff({ add: [light("a", "road", 0, 0), light("b", "building", 1, 1)] });
-  layer.render(gl, renderInput);
+  layer.render(asGl(gl), renderInput);
   assert.equal(gl.uploads.length, 1);
 
   // Context lost and restored: the rebuilt style has no custom layers, the
@@ -136,7 +162,7 @@ test("the layer returns after a WebGL context restore, with its lights", () => {
   assert.equal(map.getLayer(layer.id), layer, "added back once the style loads");
   assert.equal(layer.size, 2, "lights survive without new tile data");
 
-  layer.render(gl, renderInput);
+  layer.render(asGl(gl), renderInput);
   assert.equal(gl.uploads.length, 2, "lights are re-uploaded to the new context");
   assert.equal(gl.uploads[1], 2 * FLOATS);
   assert.ok(gl.draws > 0, "and drawn");
@@ -147,7 +173,7 @@ test("re-adding does not duplicate the layer, leak GPU objects, or show it mid-p
     map = fakeMap(gl),
     layer = createLightsLayer();
   let picking = false;
-  keepLightsLayerAttached(map, layer, { hidden: () => picking });
+  keepLightsLayerAttached(asMap(map), layer, { hidden: () => picking });
   map.fire("style.load");
   assert.equal(map.visibility[layer.id], undefined);
   const live = gl.alive.size;

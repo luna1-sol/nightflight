@@ -1,10 +1,17 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { flightCamera, meteorPath, skyClipPolygon } from "../src/view-math.ts";
+import {
+  flightCamera,
+  meteorPath,
+  skyClipPolygon,
+  type CameraOptions,
+} from "../src/view-math.ts";
 import { roadLights } from "../src/light-geometry.ts";
+import type { LngLat } from "../src/types.ts";
+import { lineString } from "./fixtures.ts";
 const rad = Math.PI / 180,
   world = 2 * Math.PI * 6371008.8;
-function recoverCamera(options, height) {
+function recoverCamera(options: CameraOptions, height: number) {
   const [lon, lat] = options.center,
     scale = 1 / (world * Math.cos(lat * rad)),
     d = height / (2 * Math.tan(30 * rad)) / (512 * 2 ** options.zoom),
@@ -74,10 +81,8 @@ test("sky clipping excludes the ground and handles fully upward/downward views",
   assert.ok(skyClipPolygon(1200, 800, -32, 0).some((p) => p[1] >= 800));
 });
 test("road lamp positions survive vector-tile clipping and stay bounded", () => {
-  const feature = (coordinates) => ({
-    properties: { class: "primary" },
-    geometry: { type: "LineString", coordinates },
-  });
+  const feature = (coordinates: LngLat[]) =>
+    lineString(coordinates, { class: "primary" });
   const whole = roadLights([
     feature([
       [139, 35],

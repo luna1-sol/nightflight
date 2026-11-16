@@ -38,7 +38,7 @@
 <div class="sr-only" id="flight-status" role="status">Cruising</div>
 <noscript><p class="fatal">Enable JavaScript to fly. <a href="./offline.html">Open the offline flight</a>.</p></noscript>
 <script>
-if(location.protocol==='file:'){const notice=document.getElementById('notice');notice.textContent='World flights need HTTP hosting. Use GitHub Pages or a local static server. ';const link=document.createElement('a');link.href='./offline.html';link.textContent='Open the offline flight';notice.append(link);}
+if(location.protocol==='file:'){const notice=document.getElementById('notice');notice.textContent='World flights need HTTP hosting. Run npm run dev, or serve the built dist/ folder. ';const link=document.createElement('a');link.href='./offline.html';link.textContent='Open the offline flight';notice.append(link);}
 </script>
 <script type="module" src="./src/nightflight.ts"></script>
 </body>

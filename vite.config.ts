@@ -82,7 +82,7 @@ function releaseStamp(): Plugin {
 }
 
 export default defineConfig({
-  // Relative URLs work both at username.github.io/ and under /repository/.
+  // Relative URLs work at a domain root and under a subdirectory.
   base: "./",
   plugins: [releaseStamp()],
   worker: { format: "es" },

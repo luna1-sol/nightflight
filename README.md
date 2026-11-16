@@ -43,20 +43,15 @@ npm run preview    # serve dist/ locally
 
 Opening the world-flight page directly with `file://` is not supported because browsers restrict JavaScript modules and workers. `offline.html` is the original self-contained procedural version and can be opened directly.
 
-## GitHub Pages
+## Hosting
 
-The site is still **static**: no server application or secret API keys. GitHub Actions (`.github/workflows/deploy.yml`) runs the tests, builds `dist/`, and publishes it.
+`npm run build` writes a **static site** to `dist/`: no server application or secret API keys. All built paths are relative, so it can be served from any static web server, at the domain root or under a subdirectory. Opening it with `file://` does not work.
 
-1. Push to the `master` branch.
-2. Once, open **Settings → Pages** and set **Source** to **GitHub Actions**.
+GitHub Actions (`.github/workflows/ci.yml`) runs the tests and the build on every push to `master` and on pull requests. It does not publish anything.
 
-Pull requests run the tests and the build but do not deploy. All built paths are relative, so both `username.github.io/` and `username.github.io/repository/` work.
-
-The bottom-right label shows the release from `package.json`, the commit, and whether you are in world or offline mode. To publish a new release, change `version` in `package.json`. The build stamps the label and the Content-Security-Policy hashes for the inline `<script>`/`<style>` blocks into the built pages, and every asset file name carries a content hash. MapLibre is built as its own file, so it stays cached across app releases.
+The bottom-right label shows the release from `package.json`, the commit, and whether you are in world or offline mode. To make a new release, change `version` in `package.json`. The build stamps the label and the Content-Security-Policy hashes for the inline `<script>`/`<style>` blocks into the built pages, and every asset file name carries a content hash. MapLibre is built as its own file, so it stays cached across app releases.
 
 Both pages declare a Content-Security-Policy `<meta>` tag (removed only while `npm run dev` is running, because hot reload needs it gone). If you point `src/config.ts` at different tile, glyph, or search providers, add their origins to `connect-src` in `index.html`.
-
-If the deployment is current but the browser looks old, use Ctrl+Shift+R (Cmd+Shift+R on macOS); the Pages cache can retain responses for about 10 minutes.
 
 ## Data and dependencies
 

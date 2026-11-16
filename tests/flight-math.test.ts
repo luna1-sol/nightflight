@@ -18,8 +18,8 @@ test("coordinates use latitude, longitude, including decimals and negative value
     heading: 90,
     name: "35.6812, 139.7671",
   });
-  assert.equal(parseCoordinates("-23.5505; -46.6333").lat, -23.5505);
-  assert.equal(parseCoordinates(".5, -.25").lon, -0.25);
+  assert.equal(parseCoordinates("-23.5505; -46.6333")!.lat, -23.5505);
+  assert.equal(parseCoordinates(".5, -.25")!.lon, -0.25);
 });
 test("malformed, non-finite, and out-of-map coordinates are rejected", () => {
   for (const text of [
@@ -46,11 +46,11 @@ test("malformed, non-finite, and out-of-map coordinates are rejected", () => {
 });
 test("locations support the map boundaries and normalize bearings", () => {
   assert.equal(
-    normalizeLocation({ lat: 85, lon: 180, heading: -90 }).heading,
+    normalizeLocation({ lat: 85, lon: 180, heading: -90 })!.heading,
     270,
   );
   assert.equal(
-    normalizeLocation({ lat: -85, lon: -180, heading: 450 }).heading,
+    normalizeLocation({ lat: -85, lon: -180, heading: 450 })!.heading,
     90,
   );
 });
@@ -104,13 +104,13 @@ test("place names drop hidden and control characters but keep real scripts", () 
   assert.equal(cleanPlaceName("می\u200cخواهم 👩\u200d🚀"), "می\u200cخواهم 👩\u200d🚀");
   assert.equal(cleanPlaceName(null), "");
   assert.equal(
-    normalizeLocation({ lat: 1, lon: 2, name: "\u202e\u200b" }).name,
+    normalizeLocation({ lat: 1, lon: 2, name: "\u202e\u200b" })!.name,
     "1.0000, 2.0000",
   );
 });
 test("place names are length-limited without splitting characters", () => {
   assert.equal(
-    normalizeLocation({ lat: 0, lon: 0, name: "x".repeat(500) }).name.length,
+    normalizeLocation({ lat: 0, lon: 0, name: "x".repeat(500) })!.name.length,
     MAX_NAME_LENGTH,
   );
   assert.equal(cleanPlaceName("🌃".repeat(5), 3), "🌃🌃🌃");
@@ -118,9 +118,9 @@ test("place names are length-limited without splitting characters", () => {
 test("shared links cannot inject long or disguised place names", () => {
   const long = encodeURIComponent("Alert ".repeat(40));
   const shared = locationFromHash(`#lat=1&lon=2&name=${long}`);
-  assert.ok(Array.from(shared.name).length <= MAX_SHARED_NAME_LENGTH);
+  assert.ok(Array.from(shared!.name).length <= MAX_SHARED_NAME_LENGTH);
   assert.equal(
-    locationFromHash("#lat=1&lon=2&name=%E2%80%AEevil%0Aline").name,
+    locationFromHash("#lat=1&lon=2&name=%E2%80%AEevil%0Aline")!.name,
     "evil line",
   );
 });

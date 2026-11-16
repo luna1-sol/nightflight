@@ -28,52 +28,58 @@ The geography is actual OpenStreetMap roads, buildings, rivers, parks, and coast
 
 Dragging uses reduced sensitivity and a short, non-overshooting ease, with safe upward/downward limits. Camera transforms are computed from the aircraft position without inheriting elevation from previous views. The view stays interactive while paused. Flight pauses while the place picker is open. Reduced-motion preferences disable automatic banking. The controls fade while idle; source attribution remains visible.
 
+## Development
+
+The source is TypeScript under `src/`, built with [Vite](https://vite.dev/). Node.js 24 or later is needed.
+
+```
+npm install
+npm run dev        # local server with hot reload
+npm test           # unit tests (Node runs the .ts files directly)
+npm run typecheck  # strict type check of src/
+npm run build      # production build into dist/
+npm run preview    # serve dist/ locally
+```
+
+Opening the world-flight page directly with `file://` is not supported because browsers restrict JavaScript modules and workers. `offline.html` is the original self-contained procedural version and can be opened directly.
+
 ## GitHub Pages
 
-This is still a **static website**. No server application, secret API keys, installation, or build step is needed on GitHub Pages.
+The site is still **static**: no server application or secret API keys. GitHub Actions (`.github/workflows/deploy.yml`) runs the tests, builds `dist/`, and publishes it.
 
-1. Push **all files**, including `vendor/`, to your GitHub repository.
-2. Open **Settings → Pages → Deploy from a branch**.
-3. Select the publishing branch and **/(root)**, then save.
+1. Push to the `master` branch.
+2. Once, open **Settings → Pages** and set **Source** to **GitHub Actions**.
 
-All local paths are relative, so both `username.github.io/` and `username.github.io/repository/` work. `.nojekyll` keeps deployment as plain static files.
+Pull requests run the tests and the build but do not deploy. All built paths are relative, so both `username.github.io/` and `username.github.io/repository/` work.
 
-The bottom-right label shows the release, a content-based build ID, and whether you are in world or offline mode. Before publishing a new release, run:
+The bottom-right label shows the release from `package.json`, the commit, and whether you are in world or offline mode. To publish a new release, change `version` in `package.json`. The build stamps the label and the Content-Security-Policy hashes for the inline `<script>`/`<style>` blocks into the built pages, and every asset file name carries a content hash. MapLibre is built as its own file, so it stays cached across app releases.
 
-```
-node scripts/release.mjs 1.1.1
-```
+Both pages declare a Content-Security-Policy `<meta>` tag (removed only while `npm run dev` is running, because hot reload needs it gone). If you point `src/config.ts` at different tile, glyph, or search providers, add their origins to `connect-src` in `index.html`.
 
-Use the next version number. This updates both labels, all local asset cache keys (files in `vendor/` are keyed by their own content, so they stay cached across app releases), and the Content-Security-Policy hashes for the inline `<script>`/`<style>` blocks; commit and push the resulting files together. `node scripts/release.mjs --check` verifies that the stamp matches the source. Running the script without a version refreshes the content-based build ID for the current release. No build command is needed on GitHub Pages because these stamped files are checked in.
-
-Both pages declare a Content-Security-Policy `<meta>` tag. If you point `config.mjs` at different tile, glyph, or search providers, add their origins to `connect-src` in `index.html`.
-
-GitHub Pages serves the pushed branch, not uncommitted local edits. Check the repository’s Actions tab for a successful Pages deployment. If the deployment is current but the browser looks old, use Ctrl+Shift+R (Cmd+Shift+R on macOS); the Pages cache can retain responses for about 10 minutes. Versioned module/CSS URLs prevent stale assets being mixed with a fresh page.
-
-For local preview, serve this directory over HTTP, for example `npx --yes serve .`. Opening the world-flight page directly with `file://` is not supported because browsers restrict JavaScript modules and workers. `offline.html` is the original self-contained procedural version and can be opened directly.
+If the deployment is current but the browser looks old, use Ctrl+Shift+R (Cmd+Shift+R on macOS); the Pages cache can retain responses for about 10 minutes.
 
 ## Data and dependencies
 
-- [MapLibre GL JS 6.16.0](https://maplibre.org/): pinned, vendored locally with its BSD-3-Clause license in `vendor/MAPLIBRE-LICENSE.txt`.
+- [MapLibre GL JS 6.16.0](https://maplibre.org/): pinned to an exact version in `package.json`. Its BSD-3-Clause license is published with the site as `MAPLIBRE-LICENSE.txt`.
 - [OpenFreeMap](https://openfreemap.org/quick_start/): public vector tiles and map-picker label glyphs, built from OpenStreetMap/OpenMapTiles. Map attribution stays visible.
 - [Photon](https://github.com/komoot/photon): public place search. Queries are sent only when Search is pressed; no autocomplete or background geocoding. Results are cached for the session and requests are limited to one per 1.2 seconds. The public service has reasonable-use limits and no availability guarantee; use your own Photon instance for high traffic.
 
-World flights require an internet connection for map data and search. Coordinate entry and map picking do not depend on the search service. If map loading fails, an error links to the offline flight. Service URLs and flight/performance settings are editable in `config.mjs`.
+World flights require an internet connection for map data and search. Coordinate entry and map picking do not depend on the search service. If map loading fails, an error links to the offline flight. Service URLs and flight/performance settings are editable in `src/config.ts`.
 
 Rendering uses MapLibre's GPU tile batching, a 30 fps animation cap, 1.25 maximum pixel density, two map workers plus a dedicated lighting worker, and a bounded tile cache. Road/building light points are capped at 12,000. Raw tile geometry is collected in short, yielding batches, transferred to the lighting worker, and refreshed at most every three seconds during normal flight, with a faster refresh after a view change settles. Stable world-coordinate keys and cached points prevent reshuffling; coarser duplicate roads are removed when detailed tiles arrive. Light radii stay consistent while tilting. The per-tile adapter targets the pinned MapLibre 6.16.0 renderer, with a public-API fallback for future upgrades. The sky overlay is separate and has no moon, cloud, rain, or fog effects. Meteor heads/tails stay above the horizon and the entire overlay is clipped to the visible sky, including during banking.
 
 ## Code structure
 
-`nightflight.mjs` coordinates the app and animation loop. `flight-state.mjs` owns movement and banking, `view-controls.mjs` handles dragging, and `sky-renderer.mjs` draws the sky overlay. `place-picker.mjs` owns the place UI; `place-search.mjs` handles search, caching, and throttling.
+All modules live in `src/`. `nightflight.ts` coordinates the app and animation loop. `flight-state.ts` owns movement and banking, `view-controls.ts` handles dragging, and `sky-renderer.ts` draws the sky overlay. `place-picker.ts` owns the place UI; `place-search.ts` handles search, caching, and throttling.
 
-`lighting-controller.mjs` schedules updates, `map-lighting-source.mjs` isolates the pinned MapLibre tile adapter, and `lights-worker.mjs` owns the per-flight light cache. Pure geometry calculations live in `light-geometry.mjs`, `place-lights.mjs`, `flight-math.mjs`, and `view-math.mjs`. Modules are served directly; no bundler is required.
+`lighting-controller.ts` schedules updates, `map-lighting-source.ts` isolates the pinned MapLibre tile adapter (the only code that reads MapLibre internals; its expected shapes are declared at the top of the file), `lights-worker.ts` owns the per-flight light cache, and `night-lights-layer.ts` draws the lights on the GPU. Pure geometry calculations live in `light-geometry.ts`, `place-lights.ts`, `flight-math.ts`, and `view-math.ts`. Shared types are in `types.ts`.
 
 ## Validation
 
 Run the coordinate, share-link, geographic-motion, light-placement, camera-stability, and meteor/horizon tests with:
 
 ```
-node --test
+npm test
 ```
 
 Browser checks cover live map loading and search, coordinate entry, map picking, share links, mouse/touch view controls, pause, mobile layout, offline errors, and deployment under a project subdirectory.

@@ -1,0 +1,25 @@
+{
+  "name": "nightflight",
+  "version": "1.1.3",
+  "private": true,
+  "type": "module",
+  "license": "MIT",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc",
+    "test": "node --test \"tests/**/*.test.ts\""
+  },
+  "dependencies": {
+    "maplibre-gl": "6.16.0"
+  },
+  "devDependencies": {
+    "@types/node": "26.6.6",
+    "typescript": "7.0.2",
+    "vite": "8.3.8"
+  }
+}

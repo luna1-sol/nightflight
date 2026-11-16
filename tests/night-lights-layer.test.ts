@@ -4,6 +4,7 @@ import {
   packLights,
   createLightsLayer,
   keepLightsLayerAttached,
+  FLOATS,
 } from "../src/night-lights-layer.ts";
 
 const light = (id, kind, lon, lat) => ({
@@ -26,7 +27,7 @@ test("packs buildings before roads, relative to the centre, across the date line
   assert.ok(Math.abs(by) < 1e-6);
   assert.deepEqual([r, g, b].map((v) => Math.round(v * 255)), [255, 128, 0]);
   assert.ok(Math.abs(radius - 0.8) < 1e-6 && Math.abs(opacity - 0.5) < 1e-6);
-  const rx = packed.data[8];
+  const rx = packed.data[FLOATS];
   assert.ok(rx > 0 && rx < 0.001, "-179.9° wraps to just east, not a world away");
 });
 
@@ -137,7 +138,7 @@ test("the layer returns after a WebGL context restore, with its lights", () => {
 
   layer.render(gl, renderInput);
   assert.equal(gl.uploads.length, 2, "lights are re-uploaded to the new context");
-  assert.equal(gl.uploads[1], 2 * 8);
+  assert.equal(gl.uploads[1], 2 * FLOATS);
   assert.ok(gl.draws > 0, "and drawn");
 });
 

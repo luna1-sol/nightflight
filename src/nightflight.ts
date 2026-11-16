@@ -128,7 +128,10 @@ class NightflightApp {
         this.wake();
       },
     });
-    this.lightsLayer = createLightsLayer();
+    this.lightsLayer = createLightsLayer({
+      origin: () => this.flight.position,
+      twinkle: !this.reducedMotion,
+    });
     this.lighting = new LightingController({
       lights: this.lightsLayer,
       getMap: () => this.map,

@@ -25,6 +25,10 @@ jobs:
       - run: npm ci
       - run: npm test
       - run: npm run build
+      - if: ${{ github.ref == 'refs/heads/master' && github.event_name != 'pull_request' && !github.event.repository.fork }}
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist
 
   browser:
     # Loads the built site in headless Chromium (software WebGL) and checks
@@ -46,3 +50,23 @@ jobs:
           name: playwright-traces
           path: test-results/
           retention-days: 7
+
+  deploy:
+    # Publishes dist/ to GitHub Pages from master of the original repository
+    # only; forks skip this. One-time setup: Settings → Pages → Source:
+    # "GitHub Actions".
+    if: ${{ github.ref == 'refs/heads/master' && github.event_name != 'pull_request' && !github.event.repository.fork }}
+    needs: [check, browser]
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    concurrency:
+      group: pages
+      cancel-in-progress: false
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

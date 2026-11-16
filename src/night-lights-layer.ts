@@ -24,7 +24,15 @@ const KINDS = {
   building: { glow: 2.6, glowOpacity: 0.2 },
   road: { glow: 2.2, glowOpacity: 0.14 },
 } as const;
-export const BLOOM: BloomSettings = { strength: 1.1, exposure: 1 };
+export const BLOOM: BloomSettings = {
+  strength: 1.1,
+  exposure: 1,
+  // The ground's average light level at the default view in dense cities
+  // (Tokyo, Paris), so that view keeps its look.
+  adaptTarget: 0.03,
+  adaptStrength: 0.7,
+  adaptMs: 600,
+};
 export const SKYGLOW = 0.8;
 
 export const FLOATS = 9; // x, y, r, g, b, radius, opacity, born (ms), seed
@@ -273,7 +281,10 @@ export function createLightsLayer({
     packed: ReturnType<typeof packLights> | null = null,
     center: [number, number] = [0.5, 0.5],
     dirty = true,
-    fadingUntil = 0;
+    fadingUntil = 0,
+    lastRender = -1,
+    adaptUntil = 0,
+    lastMatrix: Float32Array | null = null;
   const epochStart = now();
   const changed = () => {
     dirty = true;
@@ -502,6 +513,7 @@ export function createLightsLayer({
             viewport,
             BLOOM,
             scene && { ...scene, strength: SKYGLOW },
+            lastRender < 0 ? 16 : t - lastRender,
           );
         } catch (error) {
           // E.g. out of GPU memory for the targets: keep drawing, without bloom.
@@ -513,8 +525,13 @@ export function createLightsLayer({
           draw();
         }
       } else draw();
-      // Keep drawing while lights are still fading in (e.g. when paused).
-      if (t < fadingUntil) map.triggerRepaint();
+      // Keep drawing while lights fade in or the eyes adapt to a new view,
+      // even when paused.
+      if (!lastMatrix || lastMatrix.some((v, i) => v !== matrix[i]))
+        adaptUntil = t + BLOOM.adaptMs * 4;
+      lastMatrix = matrix;
+      lastRender = t;
+      if (t < fadingUntil || (bloom && t < adaptUntil)) map.triggerRepaint();
     },
   };
 }

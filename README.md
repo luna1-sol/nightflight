@@ -49,7 +49,16 @@ Opening the world-flight page directly with `file://` is not supported because b
 
 `npm run build` writes a **static site** to `dist/`: no server application or secret API keys. All built paths are relative, so it can be served from any static web server, at the domain root or under a subdirectory. Opening it with `file://` does not work.
 
-GitHub Actions (`.github/workflows/ci.yml`) runs the tests and the build on every push to `master` and on pull requests. It does not publish anything.
+GitHub Actions (`.github/workflows/ci.yml`) runs the unit tests, the build and the browser tests on every push to `master` and on pull requests.
+
+### GitHub Pages
+
+On the original repository, every push to `master` that passes the tests is published to GitHub Pages. Forks skip the publishing step, so they never deploy by accident.
+
+1. Once, open **Settings → Pages** and set **Source** to **GitHub Actions**. "Deploy from a branch" no longer works, because the repository holds TypeScript sources, not the built site.
+2. Push or merge to `master`. The `deploy` job publishes `dist/`.
+
+Pull requests run the checks but never deploy. If the deployment is current but the browser looks old, use Ctrl+Shift+R (Cmd+Shift+R on macOS); the Pages cache can retain responses for about 10 minutes.
 
 The bottom-right label shows the release from `package.json`, the commit, and whether you are in world or offline mode. To make a new release, change `version` in `package.json`. The build stamps the label and the Content-Security-Policy hashes for the inline `<script>`/`<style>` blocks into the built pages, and every asset file name carries a content hash. MapLibre is built as its own file, so it stays cached across app releases.
 

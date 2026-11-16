@@ -4,11 +4,13 @@ import {
   tileDistance,
   collectLightingGeometry,
 } from "../src/map-lighting-source.ts";
+import type { LngLat, TileCoord } from "../src/types.ts";
+import { asMap } from "./fixtures.ts";
 
 const Z = 12,
   N = 2 ** Z,
   KM_PER_DEGREE = 111.195;
-const row = (lat) => {
+const row = (lat: number) => {
   const phi = (lat * Math.PI) / 180;
   return Math.floor(
     ((1 - Math.log(Math.tan(Math.PI / 4 + phi / 2)) / Math.PI) / 2) * N,
@@ -17,7 +19,7 @@ const row = (lat) => {
 
 test("tiles across the date line are measured on the nearest world copy", () => {
   const y = row(0.01),
-    km = (x, origin) => tileDistance({ z: Z, x, y }, origin) / 1000;
+    km = (x: number, origin: LngLat) => tileDistance({ z: Z, x, y }, origin) / 1000;
   // 0.01° from the line, the neighbouring tile on the far side is ~1 km away.
   assert.ok(km(0, [179.99, 0.01]) < 1.2, "east of the line, seen from the west");
   assert.ok(km(N - 1, [-179.99, 0.01]) < 1.2, "west of the line, seen from the east");
@@ -27,7 +29,7 @@ test("tiles across the date line are measured on the nearest world copy", () => 
 });
 
 test("distance is unchanged away from the date line", () => {
-  const origin = [139.7, 0.01],
+  const origin: LngLat = [139.7, 0.01],
     x = Math.floor(((origin[0] + 180) / 360) * N),
     y = row(origin[1]);
   assert.equal(tileDistance({ z: Z, x, y }, origin), 0, "inside its own tile");
@@ -43,14 +45,18 @@ test("a whole-world tile always contains the aircraft", () => {
   assert.equal(tileDistance({ z: 0, x: 0, y: 0 }, [-179.99, 10]), 0);
 });
 
-function fakeMap(canonicals, roads) {
-  const queried = new Map(),
+interface QueryParams {
+  sourceLayer?: string;
+  filter: string[];
+}
+function fakeMap(canonicals: TileCoord[], roads: Record<string, unknown[]>) {
+  const queried = new Map<string, string[]>(),
     tiles = new Map(
       canonicals.map((canonical, i) => [
         i,
         {
           tileID: { canonical },
-          querySourceFeatures(output, { sourceLayer, filter }) {
+          querySourceFeatures(output: unknown[], { sourceLayer, filter }: QueryParams) {
             if (sourceLayer !== "transportation") return;
             const key = `${canonical.x}`,
               classes = queried.get(key) ?? [];
@@ -69,7 +75,7 @@ function fakeMap(canonicals, roads) {
       tileManagers: {
         world: {
           getRenderableIds: () => [...tiles.keys()],
-          getTileByID: (id) => tiles.get(id),
+          getTileByID: (id: number) => tiles.get(id),
         },
       },
     },
@@ -86,8 +92,8 @@ test("minor roads are collected from nearby tiles on both sides of the date line
       ],
       {},
     );
-  await collectLightingGeometry(map, { origin: [179.99, 0.01] });
-  const minor = (x) => map.queried.get(`${x}`).includes("minor");
+  await collectLightingGeometry(asMap(map), { origin: [179.99, 0.01] });
+  const minor = (x: number) => map.queried.get(`${x}`)!.includes("minor");
   assert.equal(minor(N - 1), true);
   assert.equal(minor(0), true, "the neighbouring tile across the line");
   assert.equal(minor(200), false, "distant tiles still skip minor roads");

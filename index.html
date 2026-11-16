@@ -22,6 +22,7 @@
 <button id="pause" type="button" aria-label="Pause" title="Pause (Space)" aria-pressed="false">Ⅱ</button>
 <button id="reset-view" type="button" aria-label="Reset view" title="Reset view (Home)">↺</button>
 <button id="fullscreen" type="button" aria-label="Fullscreen" title="Fullscreen (F)">⛶</button>
+<button id="settings-button" type="button" aria-label="Display settings" title="Display settings" aria-haspopup="dialog">◐</button>
 </div>
 <div id="pick-controls" class="pick-controls" hidden><span id="pick-instruction">Click anywhere to choose your starting point.</span><div><button id="cancel-pick" type="button">Cancel</button><button id="confirm-pick" class="primary" type="button" disabled>Fly here</button></div></div>
 <dialog id="places" aria-labelledby="places-title">
@@ -33,6 +34,12 @@
  <div class="route-setting"><label for="heading">Flight direction</label><select id="heading"><option value="0">North</option><option value="45">Northeast</option><option value="90" selected>East</option><option value="135">Southeast</option><option value="180">South</option><option value="225">Southwest</option><option value="270">West</option><option value="315">Northwest</option></select></div>
  <div class="dialog-actions"><button id="pick-map" type="button">Choose on the map</button><button id="copy-link" type="button">Copy flight link</button></div>
  <p class="fine-print">Real streets and coastlines, styled as night lights. Search by <a href="https://github.com/komoot/photon" target="_blank" rel="noopener noreferrer">Photon</a>. <a href="./offline.html">Offline flight</a></p>
+</dialog>
+<dialog id="settings" class="settings" aria-labelledby="settings-title">
+ <div class="dialog-heading"><div><p class="eyebrow">NIGHTFLIGHT</p><h1 id="settings-title">Display</h1></div><button class="close" id="close-settings" type="button" aria-label="Close display settings">×</button></div>
+ <label class="setting-row"><span>Glow<small>Bloom and skyglow around the lights</small></span><input id="setting-glow" type="checkbox"></label>
+ <label class="setting-row"><span>Twinkling lights<small>Off by default with reduced motion</small></span><input id="setting-twinkle" type="checkbox"></label>
+ <label class="setting-row"><span>Quality<small id="quality-note">Auto lowers it if flight runs slowly.</small></span><select id="setting-quality"><option value="auto">Auto</option><option value="high">High</option><option value="low">Low</option></select></label>
 </dialog>
 <footer class="attribution"><div id="build-version" class="build-version">dev · world</div><div><a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener noreferrer">© OpenStreetMap contributors</a> · <a href="https://openmaptiles.org/" target="_blank" rel="noopener noreferrer">© OpenMapTiles</a> · <a href="https://openfreemap.org/" target="_blank" rel="noopener noreferrer">OpenFreeMap</a></div></footer>
 <div class="sr-only" id="flight-status" role="status">Cruising</div>

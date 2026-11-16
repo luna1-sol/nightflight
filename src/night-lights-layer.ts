@@ -15,6 +15,7 @@ import type {
 } from "maplibre-gl";
 import { compileProgram, uniforms } from "./gl-utils.ts";
 import { LightBloom, type BloomSettings } from "./light-bloom.ts";
+import { SPRITE_FLOATS, type SkyScene } from "./sky-renderer.ts";
 import type { LightDiff, LightFeature, Position } from "./types.ts";
 
 // Per kind: how far the soft near glow reaches (in core radii) and its opacity.
@@ -24,6 +25,7 @@ const KINDS = {
   road: { glow: 2.2, glowOpacity: 0.14 },
 } as const;
 export const BLOOM: BloomSettings = { strength: 1.1, exposure: 1 };
+export const SKYGLOW = 0.8;
 
 export const FLOATS = 9; // x, y, r, g, b, radius, opacity, born (ms), seed
 // New lights fade in, so a tile of extra detail arriving mid-flight brightens
@@ -83,6 +85,43 @@ void main() {
   float glow = u_glow_opacity * (1.0 - smoothstep(0.0, 1.0, d / u_glow));
   float alpha = v_intensity * (core + glow * (1.0 - core));
   color = vec4(v_color * alpha, alpha);
+}`;
+
+// Sky sprites (stars, aircraft, meteors) are already in CSS pixels.
+const SKY_VERTEX = `#version 300 es
+in vec2 a_xy;
+in float a_radius;
+in vec4 a_color;
+uniform vec2 u_css;
+uniform float u_scale;
+out vec4 v_color;
+out float v_radius;
+out float v_size;
+void main() {
+  gl_Position = vec4(a_xy.x / u_css.x * 2.0 - 1.0, 1.0 - a_xy.y / u_css.y * 2.0, 0.0, 1.0);
+  v_color = a_color;
+  v_radius = max(a_radius * u_scale, 0.5);
+  v_size = 2.0 * v_radius * 3.0 + 2.0;
+  gl_PointSize = v_size;
+}`;
+const SKY_FRAGMENT = `#version 300 es
+precision highp float;
+uniform vec3 u_horizon;
+uniform float u_scale;
+uniform float u_buffer_height;
+in vec4 v_color;
+in float v_radius;
+in float v_size;
+out vec4 color;
+void main() {
+  // Nothing in the sky shows below the horizon.
+  vec2 css = vec2(gl_FragCoord.x, u_buffer_height - gl_FragCoord.y) / u_scale;
+  if (dot(u_horizon.xy, css) + u_horizon.z > 0.0) discard;
+  float d = length((gl_PointCoord - 0.5) * v_size) / v_radius;
+  float core = 1.0 - smoothstep(0.6, 1.0, d);
+  float glow = 0.25 * (1.0 - smoothstep(0.0, 1.0, d / 3.0));
+  float alpha = v_color.a * (core + glow * (1.0 - core));
+  color = vec4(v_color.rgb * alpha, alpha);
 }`;
 
 const colorCache = new Map<string, [number, number, number]>();
@@ -167,11 +206,20 @@ export function keepLightsLayerAttached(
   });
 }
 
+export interface LightsOptions {
+  /** Bloom and skyglow; off draws the lights directly (cheaper). */
+  bloom: boolean;
+  twinkle: boolean;
+}
+
 export interface LightsLayer extends CustomLayerInterface {
   readonly size: number;
+  /** "on", "off" (by setting) or "unavailable" (the GPU cannot do it). */
+  readonly bloomState: "on" | "off" | "unavailable";
   applyDiff(diff: Partial<LightDiff>): void;
   clear(): void;
   bornAt(key: string): number | undefined;
+  configure(options: Partial<LightsOptions>): void;
 }
 
 const ATTRIBUTES = ["a_pos", "a_color", "a_size", "a_born", "a_seed"] as const;
@@ -186,12 +234,18 @@ const UNIFORMS = [
   "u_twinkle",
 ] as const;
 
+const SKY_UNIFORMS = ["u_css", "u_scale", "u_horizon", "u_buffer_height"] as const;
+
 interface GpuState {
   gl: WebGL2RenderingContext;
   program: WebGLProgram;
   buffer: WebGLBuffer;
   vao: WebGLVertexArrayObject | null;
   uniforms: Record<(typeof UNIFORMS)[number], WebGLUniformLocation | null>;
+  skyProgram: WebGLProgram;
+  skyBuffer: WebGLBuffer;
+  skyVao: WebGLVertexArrayObject | null;
+  skyUniforms: Record<(typeof SKY_UNIFORMS)[number], WebGLUniformLocation | null>;
   bloom: LightBloom | null;
 }
 
@@ -199,13 +253,18 @@ export function createLightsLayer({
   id = "night-lights",
   now = () => performance.now(),
   origin = () => null,
+  sky = () => null,
   twinkle = true,
+  bloom: bloomEnabled = true,
 }: {
   id?: string;
   now?: () => number;
   /** The aircraft position; lights dim and twinkle with distance from it. */
   origin?: () => Position | null;
+  /** Stars, aircraft and meteors to draw above the horizon. */
+  sky?: () => SkyScene | null;
   twinkle?: boolean;
+  bloom?: boolean;
 } = {}): LightsLayer {
   const features = new Map<string, LightFeature>(),
     born = new Map<string, number>();
@@ -227,8 +286,31 @@ export function createLightsLayer({
     if (gl.isProgram(gpu.program)) gl.deleteProgram(gpu.program);
     if (gl.isBuffer(gpu.buffer)) gl.deleteBuffer(gpu.buffer);
     if (gpu.vao) gl.deleteVertexArray(gpu.vao);
+    if (gl.isProgram(gpu.skyProgram)) gl.deleteProgram(gpu.skyProgram);
+    if (gl.isBuffer(gpu.skyBuffer)) gl.deleteBuffer(gpu.skyBuffer);
+    if (gpu.skyVao) gl.deleteVertexArray(gpu.skyVao);
     gpu.bloom?.dispose();
     gpu = null;
+  }
+
+  function drawSky(state: GpuState, scene: SkyScene | null): void {
+    if (!scene || !scene.count || !scene.width) return;
+    const { gl, skyUniforms: u } = state,
+      scale = gl.drawingBufferWidth / scene.width;
+    gl.useProgram(state.skyProgram);
+    gl.bindVertexArray(state.skyVao);
+    gl.bindBuffer(gl.ARRAY_BUFFER, state.skyBuffer);
+    gl.bufferData(
+      gl.ARRAY_BUFFER,
+      scene.sprites.subarray(0, scene.count * SPRITE_FLOATS),
+      gl.STREAM_DRAW,
+    );
+    gl.uniform2f(u.u_css, scene.width, scene.height);
+    gl.uniform1f(u.u_scale, scale);
+    gl.uniform1f(u.u_buffer_height, gl.drawingBufferHeight);
+    gl.uniform3f(u.u_horizon, ...scene.horizon);
+    gl.drawArrays(gl.POINTS, 0, scene.count);
+    gl.bindVertexArray(null);
   }
 
   function drawPoints(state: GpuState, matrix: Float32Array, t: number): void {
@@ -292,6 +374,15 @@ export function createLightsLayer({
     bornAt(key) {
       return born.get(key);
     },
+    get bloomState() {
+      if (!bloomEnabled) return "off";
+      return gpu && !gpu.bloom ? "unavailable" : "on";
+    },
+    configure(options) {
+      if (options.twinkle !== undefined) twinkle = options.twinkle;
+      if (options.bloom !== undefined) bloomEnabled = options.bloom;
+      map?.triggerRepaint();
+    },
     onAdd(m, gl) {
       map = m;
       // A re-add may follow a teardown that never called onRemove.
@@ -317,13 +408,42 @@ export function createLightsLayer({
         gl.vertexAttribPointer(location, layout[name][0], gl.FLOAT, false, stride, layout[name][1]);
       }
       gl.bindVertexArray(null);
+      const skyProgram = compileProgram(gl, SKY_VERTEX, SKY_FRAGMENT),
+        skyBuffer = gl.createBuffer(),
+        skyVao = gl.createVertexArray();
+      if (!skyBuffer) throw new Error("Could not create a buffer");
+      gl.bindVertexArray(skyVao);
+      gl.bindBuffer(gl.ARRAY_BUFFER, skyBuffer);
+      const skyStride = SPRITE_FLOATS * 4;
+      for (const [name, size, offset] of [
+        ["a_xy", 2, 0],
+        ["a_radius", 1, 8],
+        ["a_color", 4, 12],
+      ] as const) {
+        const location = gl.getAttribLocation(skyProgram, name);
+        if (location < 0) continue;
+        gl.enableVertexAttribArray(location);
+        gl.vertexAttribPointer(location, size, gl.FLOAT, false, skyStride, offset);
+      }
+      gl.bindVertexArray(null);
       let bloom: LightBloom | null = null;
       try {
         bloom = new LightBloom(gl);
       } catch (error) {
         console.warn("Light bloom unavailable; drawing lights directly.", error);
       }
-      gpu = { gl, program, buffer, vao, uniforms: uniforms(gl, program, UNIFORMS), bloom };
+      gpu = {
+        gl,
+        program,
+        buffer,
+        vao,
+        uniforms: uniforms(gl, program, UNIFORMS),
+        skyProgram,
+        skyBuffer,
+        skyVao,
+        skyUniforms: uniforms(gl, skyProgram, SKY_UNIFORMS),
+        bloom,
+      };
       dirty = true;
     },
     onRemove(_m, gl) {
@@ -342,7 +462,9 @@ export function createLightsLayer({
         gl.bufferData(gl.ARRAY_BUFFER, packed.data, gl.DYNAMIC_DRAW);
         dirty = false;
       }
-      if (!packed || !packed.data.length) return;
+      const scene = sky(),
+        hasLights = !!packed && packed.data.length > 0;
+      if (!hasLights && !scene?.count) return;
       const worldSize =
         (map as { transform?: { worldSize?: number } }).transform?.worldSize ??
         512 * 2 ** map.getZoom();
@@ -357,20 +479,30 @@ export function createLightsLayer({
       const matrix = Float32Array.from(
           multiply(options.modelViewProjectionMatrix, model),
         ),
-        t = now() - epochStart;
+        t = now() - epochStart,
+        state = gpu,
+        draw = () => {
+          gl.enable(gl.BLEND);
+          gl.blendFunc(gl.ONE, gl.ONE); // light adds up
+          drawSky(state, scene);
+          if (hasLights) drawPoints(state, matrix, t);
+        };
       gl.disable(gl.DEPTH_TEST);
       gl.disable(gl.STENCIL_TEST);
       gl.disable(gl.SCISSOR_TEST);
-      gl.enable(gl.BLEND);
-      gl.blendFunc(gl.ONE, gl.ONE); // light adds up
-      const bloom = gpu.bloom;
+      const bloom = bloomEnabled ? gpu.bloom : null;
       if (bloom) {
         const output = gl.getParameter(gl.FRAMEBUFFER_BINDING) as WebGLFramebuffer | null,
           viewport = gl.getParameter(gl.VIEWPORT) as Int32Array;
         try {
           bloom.begin(gl.drawingBufferWidth, gl.drawingBufferHeight);
-          drawPoints(gpu, matrix, t);
-          bloom.finish(output, viewport, BLOOM);
+          draw();
+          bloom.finish(
+            output,
+            viewport,
+            BLOOM,
+            scene && { ...scene, strength: SKYGLOW },
+          );
         } catch (error) {
           // E.g. out of GPU memory for the targets: keep drawing, without bloom.
           console.warn("Light bloom failed; drawing lights directly.", error);
@@ -378,11 +510,9 @@ export function createLightsLayer({
           gpu.bloom = null;
           gl.bindFramebuffer(gl.FRAMEBUFFER, output);
           gl.viewport(viewport[0], viewport[1], viewport[2], viewport[3]);
-          gl.enable(gl.BLEND);
-          gl.blendFunc(gl.ONE, gl.ONE);
-          drawPoints(gpu, matrix, t);
+          draw();
         }
-      } else drawPoints(gpu, matrix, t);
+      } else draw();
       // Keep drawing while lights are still fading in (e.g. when paused).
       if (t < fadingUntil) map.triggerRepaint();
     },

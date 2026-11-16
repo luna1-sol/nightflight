@@ -83,20 +83,33 @@ export function meteorPath(
     elevation: meteor.elevation - (drop * progress) / duration,
   };
 }
+/**
+ * The horizon as a line in screen pixels: A·x + B·y + C ≤ 0 is sky, > 0 is
+ * ground, and (A, B) is the unit normal pointing down into the ground.
+ */
+export function horizonLine(
+  width: number,
+  height: number,
+  tilt: number,
+  roll = 0,
+): [A: number, B: number, C: number] {
+  const focal = height / (2 * Math.tan(30 * rad)),
+    r = -roll * rad;
+  return [
+    -Math.sin(r),
+    Math.cos(r),
+    (Math.sin(r) * width) / 2 -
+      (Math.cos(r) * height) / 2 +
+      focal * Math.tan(tilt * rad),
+  ];
+}
 export function skyClipPolygon(
   width: number,
   height: number,
   tilt: number,
   roll = 0,
 ): Point2[] {
-  const focal = height / (2 * Math.tan(30 * rad)),
-    r = -roll * rad,
-    A = -Math.sin(r),
-    B = Math.cos(r),
-    C =
-      (Math.sin(r) * width) / 2 -
-      (Math.cos(r) * height) / 2 +
-      focal * Math.tan(tilt * rad);
+  const [A, B, C] = horizonLine(width, height, tilt, roll);
   const corners: Point2[] = [
       [-2, -2],
       [width + 2, -2],

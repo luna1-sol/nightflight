@@ -10,7 +10,15 @@ import {
 import { flightCamera, VIEW_LIMITS } from "./view-math.ts";
 import { FlightState } from "./flight-state.ts";
 import { ViewControls } from "./view-controls.ts";
-import { SkyRenderer } from "./sky-renderer.ts";
+import { SkyRenderer, type SkyScene } from "./sky-renderer.ts";
+import {
+  QualityGovernor,
+  effectiveDisplay,
+  loadSettings,
+  saveSettings,
+  type DisplaySettings,
+} from "./quality.ts";
+import { SettingsPanel } from "./settings-panel.ts";
 import { LightingController } from "./lighting-controller.ts";
 import { PlacePicker } from "./place-picker.ts";
 import { createNightStyle } from "./night-style.ts";
@@ -99,6 +107,12 @@ class NightflightApp {
   noticeTimer: ReturnType<typeof setTimeout> | undefined;
   transientTimer: ReturnType<typeof setTimeout> | undefined;
   sky: SkyRenderer;
+  skyScene: SkyScene | null = null;
+  display: DisplaySettings;
+  governor = new QualityGovernor();
+  settingsPanel: SettingsPanel;
+  pixelRatio = 1;
+  status = "";
   view: ViewControls;
   lightsLayer: LightsLayer;
   lighting: LightingController;
@@ -119,7 +133,8 @@ class NightflightApp {
       speed: CONFIG.speed,
       reducedMotion: this.reducedMotion,
     });
-    this.sky = new SkyRenderer(this.elements.sky);
+    this.sky = new SkyRenderer();
+    this.display = loadSettings(this.reducedMotion);
     this.view = new ViewControls(this.elements.sky, {
       reducedMotion: this.reducedMotion,
       onChange: (input) => {
@@ -130,7 +145,9 @@ class NightflightApp {
     });
     this.lightsLayer = createLightsLayer({
       origin: () => this.flight.position,
-      twinkle: !this.reducedMotion,
+      sky: () => (this.picker?.isPicking ? null : this.skyScene),
+      twinkle: this.display.twinkle,
+      bloom: this.display.glow,
     });
     this.lighting = new LightingController({
       lights: this.lightsLayer,
@@ -156,14 +173,58 @@ class NightflightApp {
         this.elements.sky.focus({ preventScroll: true });
       },
       onPickingChange: (picking) => {
-        if (picking) this.sky.clear();
-        else this.applyCamera();
+        if (!picking) this.applyCamera();
         this.dirty = true;
       },
     });
+    this.settingsPanel = new SettingsPanel({
+      settings: this.display,
+      onChange: (settings) => {
+        this.display = settings;
+        saveSettings(settings);
+        // A new choice starts automatic quality afresh.
+        this.governor.reset(performance.now());
+        this.applyDisplay();
+      },
+      onClose: () => this.elements.sky.focus({ preventScroll: true }),
+    });
+    this.applyDisplay();
     this.resize();
     this.bindEvents();
     this.updateLabel();
+  }
+  maxPixelRatio(): number {
+    return Math.min(devicePixelRatio || 1, CONFIG.pixelRatio);
+  }
+  /** Applies the display settings and the automatic quality level. */
+  applyDisplay(): void {
+    const { level, bloom, pixelRatio } = effectiveDisplay(
+      this.display,
+      this.governor.level,
+      this.maxPixelRatio(),
+    );
+    this.lightsLayer.configure({ bloom, twinkle: this.display.twinkle });
+    if (pixelRatio !== this.pixelRatio) {
+      this.pixelRatio = pixelRatio;
+      this.map?.setPixelRatio(pixelRatio);
+    }
+    this.settingsPanel.setNote(
+      this.display.quality === "auto" && level > 0
+        ? level === 1
+          ? "Lowered automatically: glow is off to keep flight smooth."
+          : "Lowered automatically: glow off and fewer pixels to keep flight smooth."
+        : null,
+    );
+    this.elements.map.dataset.quality = String(level);
+    this.dirty = true;
+  }
+  /** Small, readable state for browser tests (and curious people). */
+  updateStatus(): void {
+    const status = `${this.lightsLayer.size}|${this.lightsLayer.bloomState}`;
+    if (status === this.status) return;
+    this.status = status;
+    this.elements.map.dataset.lights = String(this.lightsLayer.size);
+    this.elements.map.dataset.bloom = this.lightsLayer.bloomState;
   }
   start(): void {
     this.initializeMap();
@@ -184,11 +245,7 @@ class NightflightApp {
   resize(): void {
     this.width = innerWidth;
     this.height = innerHeight;
-    this.sky.resize(
-      this.width,
-      this.height,
-      Math.min(devicePixelRatio || 1, CONFIG.pixelRatio),
-    );
+    this.sky.resize(this.width, this.height);
     this.map?.resize();
     this.dirty = true;
   }
@@ -243,7 +300,7 @@ class NightflightApp {
         attributionControl: false,
         interactive: true,
         fadeDuration: 0,
-        pixelRatio: Math.min(devicePixelRatio || 1, CONFIG.pixelRatio),
+        pixelRatio: this.pixelRatio,
         maxTileCacheSize: 100,
         renderWorldCopies: true,
         canvasContextAttributes: {
@@ -412,7 +469,7 @@ class NightflightApp {
     });
   }
   handleKey(event: KeyboardEvent): void {
-    if (this.picker.isOpen) return;
+    if (this.picker.isOpen || this.settingsPanel.isOpen) return;
     if (event.code === "Escape" && this.picker.isPicking) {
       this.picker.cancelPicking(false);
       return;
@@ -455,6 +512,7 @@ class NightflightApp {
   tick(now: number): void {
     requestAnimationFrame((next) => this.tick(next));
     if (now - this.lastFrame < 1000 / CONFIG.frameRate - 1) return;
+    const interval = now - this.lastFrame;
     this.lastFrame = now;
     const dt = clamp((now - this.previous) / 1000, 0, 0.08);
     this.previous = now;
@@ -471,7 +529,11 @@ class NightflightApp {
     if (moving) {
       this.flight.advance(dt);
       this.dirty = true;
+      // Judge the frame rate only while flying, when every frame is drawn.
+      if (this.display.quality === "auto" && this.governor.sample(now, interval))
+        this.applyDisplay();
     }
+    this.updateStatus();
     if (!picking && !modal && !hidden && this.view.update(dt))
       this.dirty = true;
     this.lighting.update(now, {
@@ -481,7 +543,9 @@ class NightflightApp {
     if (picking || !this.dirty || hidden) return;
     this.dirty = false;
     this.applyCamera();
-    this.sky.draw(this.frame(), moving ? dt : 0);
+    // The lights layer draws the sky with the city lights on the map's next frame.
+    this.skyScene = this.sky.update(this.frame(), moving ? dt : 0);
+    this.map?.triggerRepaint();
   }
 }
 

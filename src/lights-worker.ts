@@ -156,8 +156,9 @@ export function createLightProcessor(): (message: LightRequest) => LightResponse
         ),
         // Density is measured from the aircraft, not the view centre, so
         // looking around never reshuffles which building lights exist.
-        // Generous cap: the visible share below does the even thinning, so
-        // the nearest-first cap should rarely cut (it would cut in a circle).
+        // Over the cap, building lights are thinned evenly by their stable
+        // value (dense near areas lose some, far ones none), never cut off
+        // by distance; the visible share below thins what is on screen.
         buildings = createPlaceLights(areas, {
           center,
           maxPoints: 20000,

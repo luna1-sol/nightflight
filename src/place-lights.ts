@@ -73,6 +73,8 @@ interface Candidate {
   gy: number;
   point: Point2;
   distance: number;
+  /** The stable value that also thins lights with distance (hash 419). */
+  h: number;
 }
 
 export function createPlaceLights(
@@ -148,12 +150,12 @@ export function createPlaceLights(
       distance = Math.hypot(dx, dy) * cos;
     if (distance > 65000) return;
     // Thin smoothly with distance (never by polygon), so there are no bands.
-    if (!always && hash(gx, gy, 419) >= densityAt(distance, nearDistance))
-      return;
+    const h = hash(gx, gy, 419);
+    if (!always && h >= densityAt(distance, nearDistance)) return;
     if (!insidePolygon(point, polygon.rings)) return;
     seen.add(key);
     if (hash(gx, gy, 107) < 0.13) return;
-    candidates.push({ key, gx, gy, point, distance });
+    candidates.push({ key, gx, gy, point, distance, h });
   }
   for (const polygon of polygons) {
     const { minX, minY, maxX, maxY } = polygon;
@@ -171,9 +173,19 @@ export function createPlaceLights(
       for (let gx = Math.ceil(minX / GRID - 1); gx * GRID <= maxX; gx++)
         consider(gx, gy, polygon, false);
   }
-  // Nearest first, so a full budget ends in a circle, not at polygon edges.
-  candidates.sort((a, b) => a.distance - b.distance || (a.key < b.key ? -1 : 1));
-  const points = candidates.slice(0, maxPoints).map(({ key, gx: x, gy: y, point }): CachedLight => {
+  // Over budget: keep the lights with the lowest stable value, the same one
+  // that thins them with distance. That caps the density at one level
+  // everywhere: only the dense near field is thinned, evenly, and the
+  // sparser far lights all stay. Keeping the nearest ones instead filled the
+  // ground near the aircraft and ended building lights at a hard circle.
+  const byKey = (a: Candidate, b: Candidate) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0);
+  const selected =
+    candidates.length > maxPoints
+      ? [...candidates].sort((a, b) => a.h - b.h || byKey(a, b)).slice(0, maxPoints)
+      : candidates;
+  // Nearest first, as callers expect.
+  selected.sort((a, b) => a.distance - b.distance || byKey(a, b));
+  const points = selected.map(({ key, gx: x, gy: y, point }): CachedLight => {
     const commercial = hash(x, y, 211) > 0.7,
       shade = hash(x, y, 173);
     const color =

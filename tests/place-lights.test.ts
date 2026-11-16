@@ -91,3 +91,43 @@ test("tile clipping never changes which lights exist (no tile-shaped density edg
     assert.deepEqual(pieces, whole);
   }
 });
+test("an over-budget city is thinned evenly, not cut off in a circle", () => {
+  // A city of solid residential land around the aircraft, like Paris: far
+  // more candidates than the budget allows.
+  const center: LngLat = [2.35, 48.86],
+    city = polygon(
+      [[[1.75, 48.46], [2.95, 48.46], [2.95, 49.26], [1.75, 49.26], [1.75, 48.46]]],
+      { class: "residential" },
+    );
+  const cos = Math.cos((center[1] * Math.PI) / 180),
+    km = (c: LngLat) =>
+      Math.hypot((c[0] - center[0]) * cos, c[1] - center[1]) * 111.195;
+  const all = createPlaceLights([city], { center, maxPoints: 1e9 }).features,
+    budget = Math.round(all.length / 3),
+    kept = createPlaceLights([city], { center, maxPoints: budget }).features;
+  assert.equal(kept.length, budget);
+  const count = (features: typeof all, from: number, to: number) =>
+    features.filter((f) => {
+      const d = km(f.geometry.coordinates);
+      return d >= from && d < to;
+    }).length;
+  // The density is capped at one level: the sparsest, farthest lights all
+  // stay, and the share kept only grows with distance, never dropping to
+  // zero at some radius as a nearest-first cut did.
+  assert.ok(count(all, 55, 65) > 0);
+  assert.equal(count(kept, 55, 65), count(all, 55, 65));
+  const shares = [0, 10, 20, 30, 40, 50, 55].map(
+    (from, i, edges) => count(kept, from, edges[i + 1] ?? 65) / count(all, from, edges[i + 1] ?? 65),
+  );
+  assert.ok(shares[0] > 0.05 && shares[0] < 0.6, `near field kept ${shares[0]}`);
+  for (let i = 1; i < shares.length; i++)
+    assert.ok(shares[i] >= shares[i - 1] - 0.02, `share by distance ${shares.map((v) => v.toFixed(2))}`);
+  const farthest = (features: typeof all) =>
+    features.reduce((max, f) => Math.max(max, km(f.geometry.coordinates)), 0);
+  assert.ok(farthest(kept) > farthest(all) - 1, "no circular cut-off");
+  // Stable: the same input always keeps the same lights.
+  assert.deepEqual(
+    createPlaceLights([city], { center, maxPoints: budget }).features.map((f) => f.id),
+    kept.map((f) => f.id),
+  );
+});

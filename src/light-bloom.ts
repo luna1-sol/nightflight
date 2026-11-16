@@ -42,6 +42,38 @@ void main() {
   color = sum / 12.0 * u_weight;
 }`;
 
+// Eye adaptation: the average brightness of the lights (from the smallest
+// blur level), eased over time into a 1×1 texture the composite reads.
+const ADAPT = `#version 300 es
+precision highp float;
+uniform sampler2D u_src;
+uniform sampler2D u_prev;
+uniform float u_blend;
+uniform vec3 u_horizon;   // A·x + B·y + C <= 0 is sky (CSS px); all zero = no sky
+uniform vec2 u_css;
+in vec2 v_uv;
+out vec4 color;
+void main() {
+  // Only the ground counts: the black sky would make a view with a bright
+  // horizon look dark on average and be brightened instead.
+  float sum = 0.0, count = 0.0;
+  for (int y = 0; y < 8; y++)
+    for (int x = 0; x < 12; x++) {
+      vec2 uv = (vec2(float(x), float(y)) + 0.5) / vec2(12.0, 8.0);
+      vec2 css = vec2(uv.x, 1.0 - uv.y) * u_css;
+      if (dot(u_horizon.xy, css) + u_horizon.z < 0.0) continue;
+      sum += dot(texture(u_src, uv).rgb, vec3(0.2126, 0.7152, 0.0722));
+      count += 1.0;
+    }
+  float before = texture(u_prev, vec2(0.5)).r;
+  if (count < 1.0) {
+    color = vec4(before, 0.0, 0.0, 1.0); // looking at the sky: keep adapting to the last ground
+    return;
+  }
+  float now = sum / count;
+  color = vec4(u_blend >= 1.0 ? now : mix(before, now, u_blend), 0.0, 0.0, 1.0);
+}`;
+
 const COMPOSITE = `#version 300 es
 precision highp float;
 uniform sampler2D u_light;
@@ -53,6 +85,8 @@ uniform vec3 u_horizon;   // A·x + B·y + C <= 0 is sky (CSS px, y down)
 uniform vec2 u_css;       // viewport size in CSS px
 uniform float u_glow;     // skyglow strength (0 = off)
 uniform float u_glow_height;
+uniform sampler2D u_adapted;
+uniform vec3 u_auto;       // target brightness, strength (0 = off), unused
 in vec2 v_uv;
 out vec4 color;
 // Linear below the knee, so single lights keep their designed brightness;
@@ -101,7 +135,14 @@ void main() {
       c += dome * vec3(1.0, 0.82, 0.62) * u_glow * fade;
     }
   }
-  c = knee(c * u_exposure);
+  // Partial adaptation within limits: bright views (the dense horizon) a
+  // little darker, sparse ones (looking straight down) a little brighter.
+  float adapt = 1.0;
+  if (u_auto.y > 0.0) {
+    float seen = max(texture(u_adapted, vec2(0.5)).r, 1e-5);
+    adapt = clamp(pow(u_auto.x / seen, u_auto.y), 0.7, 1.8);
+  }
+  c = knee(c * u_exposure * adapt);
   // Dither: the faint, wide glow would otherwise band in 8-bit output.
   c += (noise(gl_FragCoord.xy) - 0.5) / 255.0;
   color = vec4(max(c, 0.0), 0.0);
@@ -117,6 +158,12 @@ interface Target {
 export interface BloomSettings {
   strength: number;
   exposure: number;
+  /** Average light level that gets exposure 1 under eye adaptation. */
+  adaptTarget: number;
+  /** 0 = off, 1 = full adaptation; between, partial. */
+  adaptStrength: number;
+  /** Time constant of the adaptation (ms). */
+  adaptMs: number;
 }
 
 export interface Skyglow {
@@ -131,6 +178,14 @@ export class LightBloom {
   private down: WebGLProgram;
   private up: WebGLProgram;
   private composite: WebGLProgram;
+  private adapt: WebGLProgram;
+  private adaptU: Record<
+    "u_src" | "u_prev" | "u_blend" | "u_horizon" | "u_css",
+    WebGLUniformLocation | null
+  >;
+  /** Ping-pong 1×1 targets holding the adapted brightness; null without half floats. */
+  private adapted: [Target, Target] | null = null;
+  private adaptedFresh = true;
   private vao: WebGLVertexArrayObject;
   private downU: Record<"u_src" | "u_texel", WebGLUniformLocation | null>;
   private upU: Record<"u_src" | "u_texel" | "u_weight", WebGLUniformLocation | null>;
@@ -143,7 +198,9 @@ export class LightBloom {
     | "u_horizon"
     | "u_css"
     | "u_glow"
-    | "u_glow_height",
+    | "u_glow_height"
+    | "u_adapted"
+    | "u_auto",
     WebGLUniformLocation | null
   >;
   private format: { internal: number; type: number };
@@ -159,6 +216,8 @@ export class LightBloom {
     this.down = compileProgram(gl, FULLSCREEN_VERTEX, DOWN);
     this.up = compileProgram(gl, FULLSCREEN_VERTEX, UP);
     this.composite = compileProgram(gl, FULLSCREEN_VERTEX, COMPOSITE);
+    this.adapt = compileProgram(gl, FULLSCREEN_VERTEX, ADAPT);
+    this.adaptU = uniforms(gl, this.adapt, ["u_src", "u_prev", "u_blend", "u_horizon", "u_css"]);
     this.downU = uniforms(gl, this.down, ["u_src", "u_texel"]);
     this.upU = uniforms(gl, this.up, ["u_src", "u_texel", "u_weight"]);
     this.compositeU = uniforms(gl, this.composite, [
@@ -171,6 +230,8 @@ export class LightBloom {
       "u_css",
       "u_glow",
       "u_glow_height",
+      "u_adapted",
+      "u_auto",
     ]);
     // Half floats keep the sum of many overlapping lights; 8-bit still works
     // but clips dense areas before the tone curve can soften them.
@@ -181,6 +242,10 @@ export class LightBloom {
       ? { internal: gl.RGBA16F, type: gl.HALF_FLOAT }
       : { internal: gl.RGBA8, type: gl.UNSIGNED_BYTE };
     if (float && !this.probe()) this.format = { internal: gl.RGBA8, type: gl.UNSIGNED_BYTE };
+    // Faint average light levels need more than 8 bits; without half floats
+    // the exposure simply stays fixed.
+    if (this.format.type === gl.HALF_FLOAT)
+      this.adapted = [this.createTarget(1, 1), this.createTarget(1, 1)];
   }
 
   private probe(): boolean {
@@ -265,8 +330,9 @@ export class LightBloom {
   finish(
     output: WebGLFramebuffer | null,
     viewport: Int32Array,
-    { strength, exposure }: BloomSettings,
+    { strength, exposure, adaptTarget, adaptStrength, adaptMs }: BloomSettings,
     skyglow: Skyglow | null = null,
+    dtMs = 16,
   ): void {
     const gl = this.gl,
       light = this.light!,
@@ -280,6 +346,26 @@ export class LightBloom {
       gl.uniform2f(this.downU.u_texel, 1 / source.width, 1 / source.height);
       gl.drawArrays(gl.TRIANGLES, 0, 3);
       source = level;
+    }
+    const adapted = this.adapted && adaptStrength > 0 ? this.adapted : null;
+    if (adapted) {
+      // Read last frame's value from one 1×1 target, write the eased one to the other.
+      const [before, after] = adapted;
+      this.pass(after, this.adapt, levels[levels.length - 1]);
+      gl.activeTexture(gl.TEXTURE1);
+      gl.bindTexture(gl.TEXTURE_2D, before.texture);
+      gl.uniform1i(this.adaptU.u_src, 0);
+      gl.uniform1i(this.adaptU.u_prev, 1);
+      // Without a sky scene, every sample counts as ground.
+      gl.uniform3f(this.adaptU.u_horizon, ...(skyglow?.horizon ?? [0, 0, 1]));
+      gl.uniform2f(this.adaptU.u_css, skyglow?.width ?? 1, skyglow?.height ?? 1);
+      gl.uniform1f(
+        this.adaptU.u_blend,
+        this.adaptedFresh ? 1 : 1 - Math.exp(-Math.min(Math.max(dtMs, 0), 250) / adaptMs),
+      );
+      gl.drawArrays(gl.TRIANGLES, 0, 3);
+      this.adapted = [after, before];
+      this.adaptedFresh = false;
     }
     // Walk back up, adding each blurrier level onto the sharper one above it.
     gl.enable(gl.BLEND);
@@ -308,6 +394,10 @@ export class LightBloom {
     gl.uniform1f(u.u_strength, strength / levels.length);
     gl.uniform1f(u.u_exposure, exposure);
     gl.uniform1f(u.u_glow, skyglow?.strength ?? 0);
+    gl.activeTexture(gl.TEXTURE3);
+    gl.bindTexture(gl.TEXTURE_2D, adapted ? this.adapted![0].texture : null); // the newest
+    gl.uniform1i(u.u_adapted, 3);
+    gl.uniform3f(u.u_auto, adaptTarget, adapted ? adaptStrength : 0, 0);
     if (skyglow) {
       gl.uniform3f(u.u_horizon, ...skyglow.horizon);
       gl.uniform2f(u.u_css, skyglow.width, skyglow.height);
@@ -328,6 +418,9 @@ export class LightBloom {
     gl.deleteProgram(this.down);
     gl.deleteProgram(this.up);
     gl.deleteProgram(this.composite);
+    gl.deleteProgram(this.adapt);
+    if (this.adapted) for (const target of this.adapted) this.deleteTarget(target);
+    this.adapted = null;
     gl.deleteVertexArray(this.vao);
   }
 }

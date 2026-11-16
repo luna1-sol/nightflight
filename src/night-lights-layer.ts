@@ -3,61 +3,86 @@
 // MapLibre's workers, so lights in a newly viewed direction appeared up to
 // ~1.6 s late even though the data already existed. Here every light in the
 // buffer is drawn on every frame, wherever the camera points.
+//
+// Lights are accumulated additively and given a bloom (light-bloom.ts).
+// Distant lights dim and warm as if seen through air, and twinkle a little,
+// more so near the horizon. Without render-to-texture support the lights are
+// drawn straight onto the map instead.
 import type {
   CustomLayerInterface,
   CustomRenderMethodInput,
   Map as MapLibreMap,
 } from "maplibre-gl";
-import type { LightDiff, LightFeature } from "./types.ts";
+import { compileProgram, uniforms } from "./gl-utils.ts";
+import { LightBloom, type BloomSettings } from "./light-bloom.ts";
+import type { LightDiff, LightFeature, Position } from "./types.ts";
 
-type Pass = [kind: "building" | "road", scale: number, blur: number, opacity: number];
+// Per kind: how far the soft near glow reaches (in core radii) and its opacity.
+// The wide glow comes from the bloom.
+const KINDS = {
+  building: { glow: 2.6, glowOpacity: 0.2 },
+  road: { glow: 2.2, glowOpacity: 0.14 },
+} as const;
+export const BLOOM: BloomSettings = { strength: 1.1, exposure: 1 };
 
-// Same look as the former circle layers: [kind, size multiplier, blur, opacity].
-const PASSES: Pass[] = [
-  ["building", 3.4, 1, 0.18],
-  ["building", 1, 0.18, 1],
-  ["road", 2.8, 1, 0.13],
-  ["road", 1, 0.15, 1],
-];
-const FLOATS = 8; // x, y, r, g, b, radius, opacity, born (ms)
+export const FLOATS = 9; // x, y, r, g, b, radius, opacity, born (ms), seed
 // New lights fade in, so a tile of extra detail arriving mid-flight brightens
 // gradually instead of popping in as a visible square.
 export const FADE_IN_MS = 600;
 const WORLD = 1; // mercator units
+const EARTH_CIRCUMFERENCE = 40075016.68557849;
 
-const VERTEX = `
-attribute vec2 a_pos;
-attribute vec3 a_color;
-attribute vec2 a_size;
-attribute float a_born;
+const VERTEX = `#version 300 es
+in vec2 a_pos;
+in vec3 a_color;
+in vec2 a_size;
+in float a_born;
+in float a_seed;
 uniform mat4 u_matrix;
 uniform float u_now;
-uniform float u_scale;
 uniform float u_ratio;
-varying vec3 v_color;
-varying float v_opacity;
-varying float v_radius;
+uniform float u_glow;
+uniform vec2 u_origin;
+uniform float u_metres;
+uniform float u_twinkle;
+out vec3 v_color;
+out float v_intensity;
+out float v_radius;
+out float v_size;
 void main() {
   gl_Position = u_matrix * vec4(a_pos, 0.0, 1.0);
-  v_radius = a_size.x * u_scale * u_ratio;
-  v_color = a_color;
-  v_opacity = a_size.y * clamp((u_now - a_born) / ${FADE_IN_MS.toFixed(1)}, 0.0, 1.0);
-  gl_PointSize = 2.0 * v_radius + 2.0;
+  // Ground distance from the aircraft; positions are mercator offsets.
+  float metres = length(a_pos - u_origin) * u_metres;
+  // Aerial perspective: blue scatters out first, so far lights dim and warm.
+  float far = smoothstep(15000.0, 110000.0, metres);
+  vec3 extinction = mix(vec3(1.0), vec3(1.0, 0.8, 0.62), far);
+  float t = u_now * 0.001, s = a_seed * 6.2831853;
+  float wobble = 0.6 * sin(t * (1.1 + 1.9 * a_seed) + s) +
+                 0.4 * sin(t * (3.3 + 4.1 * fract(a_seed * 7.0)) + 3.0 * s);
+  float twinkle = 1.0 + u_twinkle * (0.03 + 0.14 * far) * wobble;
+  float fade = clamp((u_now - a_born) / ${FADE_IN_MS.toFixed(1)}, 0.0, 1.0);
+  v_color = a_color * extinction;
+  v_intensity = a_size.y * fade * twinkle * mix(1.0, 0.6, far);
+  v_radius = a_size.x * u_ratio;
+  v_size = 2.0 * v_radius * u_glow + 2.0;
+  gl_PointSize = v_size;
 }`;
-const FRAGMENT = `
-precision mediump float;
-uniform float u_blur;
-uniform float u_opacity;
-varying vec3 v_color;
-varying float v_opacity;
-varying float v_radius;
+const FRAGMENT = `#version 300 es
+precision highp float; // must match the vertex shader for shared uniforms
+uniform float u_glow;
+uniform float u_glow_opacity;
+in vec3 v_color;
+in float v_intensity;
+in float v_radius;
+in float v_size;
+out vec4 color;
 void main() {
-  float size = 2.0 * v_radius + 2.0;
-  float d = length((gl_PointCoord - 0.5) * size) / v_radius;
+  float d = length((gl_PointCoord - 0.5) * v_size) / v_radius; // core radii
   float aa = 1.0 / max(v_radius, 0.01);
-  float t = smoothstep(1.0 - max(u_blur, aa), 1.0, d);
-  float alpha = v_opacity * u_opacity * (1.0 - t);
-  gl_FragColor = vec4(v_color * alpha, alpha);
+  float core = 1.0 - smoothstep(1.0 - max(0.18, aa), 1.0, d);
+  float glow = u_glow_opacity * (1.0 - smoothstep(0.0, 1.0, d / u_glow));
+  float alpha = v_intensity * (core + glow * (1.0 - core));
+  color = vec4(v_color * alpha, alpha);
 }`;
 
 const colorCache = new Map<string, [number, number, number]>();
@@ -70,11 +95,18 @@ function rgb(hex: string): [number, number, number] {
   }
   return value;
 }
+/** Stable value in [0, 1) per light id, so each light twinkles its own way. */
+function seedOf(id: string): number {
+  let h = 2166136261;
+  for (let i = 0; i < id.length; i++) h = Math.imul(h ^ id.charCodeAt(i), 16777619);
+  return (h >>> 0) / 4294967296;
+}
 const mercatorX = (lon: number): number => (lon + 180) / 360;
 const mercatorY = (lat: number): number => {
   const phi = (Math.max(-85, Math.min(85, lat)) * Math.PI) / 180;
   return (1 - Math.log(Math.tan(Math.PI / 4 + phi / 2)) / Math.PI) / 2;
 };
+const wrapped = (dx: number): number => dx - Math.round(dx / WORLD) * WORLD;
 
 /** Packs lights into [buildings..., roads...] relative to `center` (mercator). */
 export function packLights(
@@ -92,9 +124,7 @@ export function packLights(
     const [lon, lat] = feature.geometry.coordinates,
       p = feature.properties,
       color = rgb(p.color);
-    let dx = mercatorX(lon) - center[0];
-    dx -= Math.round(dx / WORLD) * WORLD; // across the date line
-    data[i++] = dx;
+    data[i++] = wrapped(mercatorX(lon) - center[0]); // across the date line
     data[i++] = mercatorY(lat) - center[1];
     data[i++] = color[0];
     data[i++] = color[1];
@@ -102,6 +132,7 @@ export function packLights(
     data[i++] = p.radius;
     data[i++] = p.opacity;
     data[i++] = born.get(feature.id) ?? -1e9;
+    data[i++] = seedOf(feature.id);
   }
   return { data, buildings: buildings.length, roads: roads.length };
 }
@@ -115,15 +146,6 @@ function multiply(a: ArrayLike<number>, b: ArrayLike<number>): Float64Array {
       out[col * 4 + row] = sum;
     }
   return out;
-}
-function compile(gl: WebGL2RenderingContext, type: number, source: string): WebGLShader {
-  const shader = gl.createShader(type);
-  if (!shader) throw new Error("Could not create a shader");
-  gl.shaderSource(shader, source);
-  gl.compileShader(shader);
-  if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS))
-    throw new Error(gl.getShaderInfoLog(shader) ?? "Shader compile failed");
-  return shader;
 }
 
 // MapLibre rebuilds the style from a snapshot after a WebGL context loss (and
@@ -152,31 +174,94 @@ export interface LightsLayer extends CustomLayerInterface {
   bornAt(key: string): number | undefined;
 }
 
-type Attribute = "a_pos" | "a_color" | "a_size" | "a_born";
-type Uniform = "u_matrix" | "u_scale" | "u_ratio" | "u_blur" | "u_opacity" | "u_now";
-type Locations = Record<Attribute, number> & Record<Uniform, WebGLUniformLocation | null>;
-const ATTRIBUTES: Attribute[] = ["a_pos", "a_color", "a_size", "a_born"],
-  UNIFORMS: Uniform[] = ["u_matrix", "u_scale", "u_ratio", "u_blur", "u_opacity", "u_now"];
+const ATTRIBUTES = ["a_pos", "a_color", "a_size", "a_born", "a_seed"] as const;
+const UNIFORMS = [
+  "u_matrix",
+  "u_now",
+  "u_ratio",
+  "u_glow",
+  "u_glow_opacity",
+  "u_origin",
+  "u_metres",
+  "u_twinkle",
+] as const;
+
+interface GpuState {
+  gl: WebGL2RenderingContext;
+  program: WebGLProgram;
+  buffer: WebGLBuffer;
+  vao: WebGLVertexArrayObject | null;
+  uniforms: Record<(typeof UNIFORMS)[number], WebGLUniformLocation | null>;
+  bloom: LightBloom | null;
+}
 
 export function createLightsLayer({
   id = "night-lights",
   now = () => performance.now(),
-}: { id?: string; now?: () => number } = {}): LightsLayer {
+  origin = () => null,
+  twinkle = true,
+}: {
+  id?: string;
+  now?: () => number;
+  /** The aircraft position; lights dim and twinkle with distance from it. */
+  origin?: () => Position | null;
+  twinkle?: boolean;
+} = {}): LightsLayer {
   const features = new Map<string, LightFeature>(),
     born = new Map<string, number>();
   let map: MapLibreMap | null = null,
-    program: WebGLProgram | null = null,
-    buffer: WebGLBuffer | null = null,
-    locations: Locations | null = null,
+    gpu: GpuState | null = null,
     packed: ReturnType<typeof packLights> | null = null,
     center: [number, number] = [0.5, 0.5],
     dirty = true,
-    fadingUntil = 0,
-    epochStart = now();
+    fadingUntil = 0;
+  const epochStart = now();
   const changed = () => {
     dirty = true;
     map?.triggerRepaint();
   };
+
+  function release(gl: WebGL2RenderingContext): void {
+    if (!gpu) return;
+    // isProgram/isBuffer are false for objects that died with a lost context.
+    if (gl.isProgram(gpu.program)) gl.deleteProgram(gpu.program);
+    if (gl.isBuffer(gpu.buffer)) gl.deleteBuffer(gpu.buffer);
+    if (gpu.vao) gl.deleteVertexArray(gpu.vao);
+    gpu.bloom?.dispose();
+    gpu = null;
+  }
+
+  function drawPoints(state: GpuState, matrix: Float32Array, t: number): void {
+    const { gl, uniforms: u } = state;
+    if (!packed) return;
+    gl.useProgram(state.program);
+    gl.bindVertexArray(state.vao);
+    gl.uniformMatrix4fv(u.u_matrix, false, matrix);
+    gl.uniform1f(u.u_now, t);
+    gl.uniform1f(u.u_ratio, map!.getPixelRatio());
+    gl.uniform1f(u.u_twinkle, twinkle ? 1 : 0);
+    const position = origin(),
+      lat = position?.lat ?? 0;
+    gl.uniform2f(
+      u.u_origin,
+      position ? wrapped(mercatorX(position.lon) - center[0]) : 0,
+      position ? mercatorY(position.lat) - center[1] : 0,
+    );
+    gl.uniform1f(
+      u.u_metres,
+      EARTH_CIRCUMFERENCE * Math.cos((lat * Math.PI) / 180),
+    );
+    for (const kind of ["building", "road"] as const) {
+      const first = kind === "road" ? packed.buildings : 0,
+        count = kind === "road" ? packed.roads : packed.buildings;
+      if (!count) continue;
+      gl.uniform1f(u.u_glow, KINDS[kind].glow);
+      gl.uniform1f(u.u_glow_opacity, KINDS[kind].glowOpacity);
+      gl.drawArrays(gl.POINTS, first, count);
+    }
+    gl.bindVertexArray(null);
+  }
+
   return {
     id,
     type: "custom",
@@ -209,42 +294,51 @@ export function createLightsLayer({
     },
     onAdd(m, gl) {
       map = m;
-      // A re-add may follow a teardown that never called onRemove. isProgram
-      // and isBuffer are false for objects that died with a lost context.
-      if (program && gl.isProgram(program)) gl.deleteProgram(program);
-      if (buffer && gl.isBuffer(buffer)) gl.deleteBuffer(buffer);
-      const vertex = compile(gl, gl.VERTEX_SHADER, VERTEX),
-        fragment = compile(gl, gl.FRAGMENT_SHADER, FRAGMENT);
-      const linked = gl.createProgram();
-      program = linked;
-      gl.attachShader(program, vertex);
-      gl.attachShader(program, fragment);
-      gl.linkProgram(program);
-      gl.deleteShader(vertex);
-      gl.deleteShader(fragment);
-      if (!gl.getProgramParameter(program, gl.LINK_STATUS))
-        throw new Error(gl.getProgramInfoLog(program) ?? "Program link failed");
-      locations = Object.fromEntries([
-        ...ATTRIBUTES.map((n) => [n, gl.getAttribLocation(linked, n)]),
-        ...UNIFORMS.map((n) => [n, gl.getUniformLocation(linked, n)]),
-      ]) as Locations;
-      buffer = gl.createBuffer();
+      // A re-add may follow a teardown that never called onRemove.
+      release(gl);
+      const program = compileProgram(gl, VERTEX, FRAGMENT),
+        buffer = gl.createBuffer(),
+        vao = gl.createVertexArray();
+      if (!buffer) throw new Error("Could not create a buffer");
+      gl.bindVertexArray(vao);
+      gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
+      const stride = FLOATS * 4,
+        layout: Record<(typeof ATTRIBUTES)[number], [size: number, offset: number]> = {
+          a_pos: [2, 0],
+          a_color: [3, 8],
+          a_size: [2, 20],
+          a_born: [1, 28],
+          a_seed: [1, 32],
+        };
+      for (const name of ATTRIBUTES) {
+        const location = gl.getAttribLocation(program, name);
+        if (location < 0) continue;
+        gl.enableVertexAttribArray(location);
+        gl.vertexAttribPointer(location, layout[name][0], gl.FLOAT, false, stride, layout[name][1]);
+      }
+      gl.bindVertexArray(null);
+      let bloom: LightBloom | null = null;
+      try {
+        bloom = new LightBloom(gl);
+      } catch (error) {
+        console.warn("Light bloom unavailable; drawing lights directly.", error);
+      }
+      gpu = { gl, program, buffer, vao, uniforms: uniforms(gl, program, UNIFORMS), bloom };
       dirty = true;
     },
-    onRemove(m, gl) {
-      gl.deleteBuffer(buffer);
-      gl.deleteProgram(program);
-      map = program = buffer = null;
+    onRemove(_m, gl) {
+      release(gl);
+      map = null;
     },
     render(gl: WebGL2RenderingContext, options: CustomRenderMethodInput) {
-      if (!program || !map || !locations) return;
+      if (!gpu || !map) return;
       const mapCenter = map.getCenter();
       if (dirty) {
         // Positions are stored relative to a nearby centre so float32 keeps
         // metre-level precision; the matrix adds the centre back in float64.
         center = [mercatorX(mapCenter.lng), mercatorY(mapCenter.lat)];
         packed = packLights(features.values(), center, born);
-        gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
+        gl.bindBuffer(gl.ARRAY_BUFFER, gpu.buffer);
         gl.bufferData(gl.ARRAY_BUFFER, packed.data, gl.DYNAMIC_DRAW);
         dirty = false;
       }
@@ -261,40 +355,34 @@ export function createLightsLayer({
         cx * worldSize, center[1] * worldSize, 0, 1,
       ]);
       const matrix = Float32Array.from(
-        multiply(options.modelViewProjectionMatrix, model),
-      );
-      gl.useProgram(program);
-      gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
-      const stride = FLOATS * 4;
-      gl.enableVertexAttribArray(locations.a_pos);
-      gl.vertexAttribPointer(locations.a_pos, 2, gl.FLOAT, false, stride, 0);
-      gl.enableVertexAttribArray(locations.a_color);
-      gl.vertexAttribPointer(locations.a_color, 3, gl.FLOAT, false, stride, 8);
-      gl.enableVertexAttribArray(locations.a_size);
-      gl.vertexAttribPointer(locations.a_size, 2, gl.FLOAT, false, stride, 20);
-      gl.enableVertexAttribArray(locations.a_born);
-      gl.vertexAttribPointer(locations.a_born, 1, gl.FLOAT, false, stride, 28);
-      const t = now() - epochStart;
-      gl.uniform1f(locations.u_now, t);
-      gl.uniformMatrix4fv(locations.u_matrix, false, matrix);
-      gl.uniform1f(locations.u_ratio, map.getPixelRatio());
+          multiply(options.modelViewProjectionMatrix, model),
+        ),
+        t = now() - epochStart;
       gl.disable(gl.DEPTH_TEST);
       gl.disable(gl.STENCIL_TEST);
+      gl.disable(gl.SCISSOR_TEST);
       gl.enable(gl.BLEND);
-      gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
-      for (const [kind, scale, blur, opacity] of PASSES) {
-        const first = kind === "road" ? packed.buildings : 0,
-          count = kind === "road" ? packed.roads : packed.buildings;
-        if (!count) continue;
-        gl.uniform1f(locations.u_scale, scale);
-        gl.uniform1f(locations.u_blur, blur);
-        gl.uniform1f(locations.u_opacity, opacity);
-        gl.drawArrays(gl.POINTS, first, count);
-      }
-      gl.disableVertexAttribArray(locations.a_pos);
-      gl.disableVertexAttribArray(locations.a_color);
-      gl.disableVertexAttribArray(locations.a_size);
-      gl.disableVertexAttribArray(locations.a_born);
+      gl.blendFunc(gl.ONE, gl.ONE); // light adds up
+      const bloom = gpu.bloom;
+      if (bloom) {
+        const output = gl.getParameter(gl.FRAMEBUFFER_BINDING) as WebGLFramebuffer | null,
+          viewport = gl.getParameter(gl.VIEWPORT) as Int32Array;
+        try {
+          bloom.begin(gl.drawingBufferWidth, gl.drawingBufferHeight);
+          drawPoints(gpu, matrix, t);
+          bloom.finish(output, viewport, BLOOM);
+        } catch (error) {
+          // E.g. out of GPU memory for the targets: keep drawing, without bloom.
+          console.warn("Light bloom failed; drawing lights directly.", error);
+          bloom.dispose();
+          gpu.bloom = null;
+          gl.bindFramebuffer(gl.FRAMEBUFFER, output);
+          gl.viewport(viewport[0], viewport[1], viewport[2], viewport[3]);
+          gl.enable(gl.BLEND);
+          gl.blendFunc(gl.ONE, gl.ONE);
+          drawPoints(gpu, matrix, t);
+        }
+      } else drawPoints(gpu, matrix, t);
       // Keep drawing while lights are still fading in (e.g. when paused).
       if (t < fadingUntil) map.triggerRepaint();
     },

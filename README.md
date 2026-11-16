@@ -25,8 +25,9 @@ The geography is actual OpenStreetMap roads, buildings, rivers, parks, and coast
 | Space | Pause / resume |
 | L | Choose a place |
 | F | Fullscreen |
+| ◐ button | Display settings: glow, twinkling, quality |
 
-Dragging uses reduced sensitivity and a short, non-overshooting ease, with safe upward/downward limits. Camera transforms are computed from the aircraft position without inheriting elevation from previous views. The view stays interactive while paused. Flight pauses while the place picker is open. Reduced-motion preferences disable automatic banking. The controls fade while idle; source attribution remains visible.
+Dragging uses reduced sensitivity and a short, non-overshooting ease, with safe upward/downward limits. Camera transforms are computed from the aircraft position without inheriting elevation from previous views. The view stays interactive while paused. Flight pauses while the place picker is open. Reduced-motion preferences disable automatic banking and, by default, twinkling. The controls fade while idle; source attribution remains visible.
 
 ## Development
 
@@ -36,7 +37,8 @@ The source is TypeScript under `src/`, built with [Vite](https://vite.dev/). Nod
 npm install
 npm run dev        # local server with hot reload
 npm test           # unit tests (Node runs the .ts files directly)
-npm run typecheck  # strict type check of src/
+npm run test:e2e   # browser tests (Playwright; run `npx playwright install chromium` once)
+npm run typecheck  # strict type check
 npm run build      # production build into dist/
 npm run preview    # serve dist/ locally
 ```
@@ -61,23 +63,32 @@ Both pages declare a Content-Security-Policy `<meta>` tag (removed only while `n
 
 World flights require an internet connection for map data and search. Coordinate entry and map picking do not depend on the search service. If map loading fails, an error links to the offline flight. Service URLs and flight/performance settings are editable in `src/config.ts`.
 
-Rendering uses MapLibre's GPU tile batching, a 30 fps animation cap, 1.25 maximum pixel density, two map workers plus a dedicated lighting worker, and a bounded tile cache. Road/building light points are capped at 12,000. Raw tile geometry is collected in short, yielding batches, transferred to the lighting worker, and refreshed at most every three seconds during normal flight, with a faster refresh after a view change settles. Stable world-coordinate keys and cached points prevent reshuffling; coarser duplicate roads are removed when detailed tiles arrive. Light radii stay consistent while tilting. Lights are drawn additively into an offscreen texture (half-float where the GPU supports it), given a multi-level bloom, and composited with a soft tone curve, so dense districts glow instead of clipping. Distant lights dim and warm slightly, as if seen through air, and twinkle gently, more so near the horizon; twinkling is off when reduced motion is requested. Without render-to-texture support the lights are drawn directly, without bloom. The per-tile adapter targets the pinned MapLibre 6.16.0 renderer, with a public-API fallback for future upgrades. The sky overlay is separate and has no moon, cloud, rain, or fog effects. Meteor heads/tails stay above the horizon and the entire overlay is clipped to the visible sky, including during banking.
+Rendering uses MapLibre's GPU tile batching, a 30 fps animation cap, 1.25 maximum pixel density, two map workers plus a dedicated lighting worker, and a bounded tile cache. Road/building light points are capped at 12,000. Raw tile geometry is collected in short, yielding batches, transferred to the lighting worker, and refreshed at most every three seconds during normal flight, with a faster refresh after a view change settles. Stable world-coordinate keys and cached points prevent reshuffling; coarser duplicate roads are removed when detailed tiles arrive. Light radii stay consistent while tilting. Lights are drawn additively into an offscreen texture (half-float where the GPU supports it), given a multi-level bloom, and composited with a soft tone curve, so dense districts glow instead of clipping. Distant lights dim and warm slightly, as if seen through air, and twinkle gently, more so near the horizon; twinkling is off when reduced motion is requested. Without render-to-texture support the lights are drawn directly, without bloom. Stars, distant aircraft and meteors are drawn on the GPU in the same pass, so they share the bloom, and are clipped to the sky above the horizon line, including during banking. A warm skyglow rises above bright districts: city light gathered from below the horizon and faded with height.
+
+The display settings (◐) switch the glow and twinkling and choose the quality. Settings are remembered in the browser. At *Auto* quality, if flight runs well below the frame cap for a few seconds, the glow is turned off first, then the pixel density drops to 1. It does not switch back by itself during the session; changing a setting starts over. *Low* applies both at once, *High* never lowers anything. The per-tile adapter targets the pinned MapLibre 6.16.0 renderer, with a public-API fallback for future upgrades. There are no moon, cloud, rain, or fog effects. Meteor heads/tails stay above the horizon.
 
 ## Code structure
 
-All modules live in `src/`. `nightflight.ts` coordinates the app and animation loop. `flight-state.ts` owns movement and banking, `view-controls.ts` handles dragging, and `sky-renderer.ts` draws the sky overlay. `place-picker.ts` owns the place UI; `place-search.ts` handles search, caching, and throttling.
+All modules live in `src/`. `nightflight.ts` coordinates the app and animation loop. `flight-state.ts` owns movement and banking, `view-controls.ts` handles dragging, and `sky-renderer.ts` lays out the stars, aircraft and meteors for the lights layer to draw. `quality.ts` holds the display settings and automatic quality; `settings-panel.ts` is their dialog. `place-picker.ts` owns the place UI; `place-search.ts` handles search, caching, and throttling.
 
 `lighting-controller.ts` schedules updates, `map-lighting-source.ts` isolates the pinned MapLibre tile adapter (the only code that reads MapLibre internals; its expected shapes are declared at the top of the file), `lights-worker.ts` owns the per-flight light cache, `night-lights-layer.ts` draws the lights on the GPU, and `light-bloom.ts` adds their glow (`gl-utils.ts` holds the shared WebGL helpers). Pure geometry calculations live in `light-geometry.ts`, `place-lights.ts`, `flight-math.ts`, and `view-math.ts`. Shared types are in `types.ts`.
 
 ## Validation
 
-Run the coordinate, share-link, geographic-motion, light-placement, camera-stability, and meteor/horizon tests with:
+Run the coordinate, share-link, geographic-motion, light-placement, camera-stability, meteor/horizon and quality tests with:
 
 ```
 npm test
 ```
 
-Browser checks cover live map loading and search, coordinate entry, map picking, share links, mouse/touch view controls, pause, mobile layout, offline errors, and deployment under a project subdirectory.
+Browser tests (`e2e/`, Playwright with headless Chromium and software WebGL) load the production build and check that the city lights are actually drawn on screen, that they return after a WebGL context loss and restore, that they keep going while flying across the date line, and that display settings apply and persist. They use the public map tiles, so they need network access:
+
+```
+npx playwright install chromium   # once
+npm run test:e2e
+```
+
+CI runs the unit tests, the build and the browser tests on every push to `master` and on pull requests. The `#map` element exposes `data-state`, `data-lights`, `data-bloom` and `data-quality` for these tests.
 
 ## Acknowledgements
 

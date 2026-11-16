@@ -1,9 +1,26 @@
+// Works out what the night sky shows for a frame: stars, distant aircraft
+// and the occasional meteor, as glowing sprites in screen pixels. The lights
+// layer draws them on the GPU together with the city lights, so they share
+// the bloom, and clips them to the sky above the horizon line.
 import { clamp } from "./flight-math.ts";
 import { seededRandom } from "./flight-state.ts";
-import { meteorPath, skyClipPolygon, type Meteor } from "./view-math.ts";
+import { horizonLine, meteorPath, type Meteor } from "./view-math.ts";
 import type { Frame } from "./types.ts";
 const RAD = Math.PI / 180,
   TAU = Math.PI * 2;
+
+/** x, y (CSS px), radius (CSS px), r, g, b, alpha */
+export const SPRITE_FLOATS = 7;
+const MAX_SPRITES = 1024;
+
+export interface SkyScene {
+  sprites: Float32Array;
+  count: number;
+  /** A·x + B·y + C ≤ 0 is sky, in CSS pixels. */
+  horizon: [number, number, number];
+  width: number;
+  height: number;
+}
 
 interface Star {
   az: number;
@@ -14,20 +31,27 @@ interface ActiveMeteor extends Meteor {
   t: number;
 }
 
+const colorCache = new Map<string, [number, number, number]>();
+function rgb(hex: string): [number, number, number] {
+  let value = colorCache.get(hex);
+  if (!value) {
+    const n = parseInt(hex.slice(1, 7), 16);
+    value = [((n >> 16) & 255) / 255, ((n >> 8) & 255) / 255, (n & 255) / 255];
+    colorCache.set(hex, value);
+  }
+  return value;
+}
+
 export class SkyRenderer {
-  canvas: HTMLCanvasElement;
-  context: CanvasRenderingContext2D;
   stars: Star[];
   meteor: ActiveMeteor | null = null;
   nextMeteor = 5;
   width = 0;
   height = 0;
+  private sprites = new Float32Array(MAX_SPRITES * SPRITE_FLOATS);
+  private count = 0;
 
-  constructor(canvas: HTMLCanvasElement) {
-    this.canvas = canvas;
-    const context = canvas.getContext("2d");
-    if (!context) throw new Error("Canvas 2D is unavailable");
-    this.context = context;
+  constructor() {
     this.stars = Array.from({ length: 550 }, (_, index) => ({
       az: seededRandom(index, 1) * TAU,
       elevation: Math.asin(seededRandom(index, 2)),
@@ -39,15 +63,9 @@ export class SkyRenderer {
     this.meteor = null;
     this.nextMeteor = 5;
   }
-  resize(width: number, height: number, pixelRatio: number): void {
+  resize(width: number, height: number): void {
     this.width = width;
     this.height = height;
-    this.canvas.width = Math.round(width * pixelRatio);
-    this.canvas.height = Math.round(height * pixelRatio);
-    this.context.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
-  }
-  clear(): void {
-    this.context.clearRect(0, 0, this.width, this.height);
   }
   project(
     az: number,
@@ -74,44 +92,47 @@ export class SkyRenderer {
       y: this.height / 2 + x * Math.sin(roll) + y * Math.cos(roll),
     };
   }
-  glow(
+  private sprite(
     x: number,
     y: number,
     radius: number,
     color: string,
-    opacity: number,
+    alpha: number,
   ): void {
-    if (x < -10 || x > this.width + 10 || y < -10 || y > this.height + 10)
+    if (
+      this.count >= MAX_SPRITES ||
+      x < -10 ||
+      x > this.width + 10 ||
+      y < -10 ||
+      y > this.height + 10
+    )
       return;
-    const ctx = this.context;
-    ctx.globalAlpha = opacity;
-    ctx.fillStyle = color;
-    ctx.shadowBlur = radius * 4;
-    ctx.shadowColor = color;
-    ctx.beginPath();
-    ctx.arc(x, y, radius, 0, TAU);
-    ctx.fill();
-    ctx.shadowBlur = 0;
+    const [r, g, b] = rgb(color),
+      data = this.sprites;
+    let i = this.count++ * SPRITE_FLOATS;
+    data[i++] = x;
+    data[i++] = y;
+    data[i++] = radius;
+    data[i++] = r;
+    data[i++] = g;
+    data[i++] = b;
+    data[i] = alpha;
   }
-  drawStars(frame: Frame): void {
-    const ctx = this.context;
+  private addStars(frame: Frame): void {
     for (const star of this.stars) {
       const point = this.project(star.az, star.elevation, frame);
-      if (
-        !point ||
-        point.x < 0 ||
-        point.x > this.width ||
-        point.y < 0 ||
-        point.y > this.height
-      )
-        continue;
-      const size = star.brightness > 0.96 ? 1.3 : 0.7;
-      ctx.globalAlpha = 0.15 + star.brightness * 0.4;
-      ctx.fillStyle = "#d1dce7";
-      ctx.fillRect(point.x, point.y, size, size);
+      if (!point) continue;
+      const bright = star.brightness > 0.96;
+      this.sprite(
+        point.x,
+        point.y,
+        bright ? 0.9 : 0.6,
+        "#d1dce7",
+        0.2 + star.brightness * 0.5,
+      );
     }
   }
-  drawAircraft(frame: Frame): void {
+  private addAircraft(frame: Frame): void {
     for (let index = 0; index < 3; index++) {
       const along = 22000 - ((frame.time + index * 71) % 250) * 170,
         outward = 14000 + index * 8000,
@@ -124,13 +145,13 @@ export class SkyRenderer {
         frame,
       );
       if (!point) continue;
-      this.glow(point.x, point.y, 0.7, "#e4e3d7", 0.6);
-      this.glow(point.x - 1.2, point.y, 0.5, "#ef6354", 0.65);
+      this.sprite(point.x, point.y, 0.7, "#e4e3d7", 0.6);
+      this.sprite(point.x - 1.2, point.y, 0.5, "#ef6354", 0.65);
       if ((frame.time + index * 0.43) % 1.4 < 0.09)
-        this.glow(point.x, point.y, 1.4, "#eff6ff", 0.9);
+        this.sprite(point.x, point.y, 1.4, "#eff6ff", 0.9);
     }
   }
-  drawMeteor(frame: Frame, dt: number): void {
+  private addMeteor(frame: Frame, dt: number): void {
     this.nextMeteor -= dt;
     if (this.nextMeteor <= 0) {
       this.meteor = {
@@ -158,35 +179,35 @@ export class SkyRenderer {
     const a = this.project(head.az, head.elevation, frame),
       b = this.project(tail.az, tail.elevation, frame);
     if (!a || !b) return;
-    const ctx = this.context,
-      gradient = ctx.createLinearGradient(b.x, b.y, a.x, a.y);
-    gradient.addColorStop(0, "#cddfff00");
-    gradient.addColorStop(1, "#e3efff");
-    ctx.globalAlpha = Math.sin((meteor.t / 1.05) * Math.PI);
-    ctx.strokeStyle = gradient;
-    ctx.lineWidth = 1.1;
-    ctx.beginPath();
-    ctx.moveTo(b.x, b.y);
-    ctx.lineTo(a.x, a.y);
-    ctx.stroke();
+    // A streak of overlapping dots, fading in from the tail to the head.
+    const fade = Math.sin((meteor.t / 1.05) * Math.PI),
+      steps = Math.min(120, Math.max(2, Math.ceil(Math.hypot(a.x - b.x, a.y - b.y) / 1.2)));
+    for (let i = 0; i <= steps; i++) {
+      const t = i / steps;
+      this.sprite(
+        b.x + (a.x - b.x) * t,
+        b.y + (a.y - b.y) * t,
+        0.55,
+        "#e3efff",
+        fade * t * 0.55,
+      );
+    }
   }
-  draw(frame: Frame, dt: number): void {
-    this.clear();
-    const ctx = this.context;
-    ctx.save();
-    ctx.beginPath();
-    skyClipPolygon(
-      this.width,
-      this.height,
-      frame.tilt,
-      frame.bank * 0.5,
-    ).forEach(([x, y], index) => (index ? ctx.lineTo(x, y) : ctx.moveTo(x, y)));
-    ctx.closePath();
-    ctx.clip();
-    this.drawStars(frame);
-    this.drawAircraft(frame);
-    this.drawMeteor(frame, dt);
-    ctx.restore();
-    ctx.globalAlpha = 1;
+  /** Advances meteors by `dt` and lays out this frame's sky. */
+  update(frame: Frame, dt: number): SkyScene {
+    this.count = 0;
+    this.addStars(frame);
+    this.addAircraft(frame);
+    this.addMeteor(frame, dt);
+    return this.scene(frame);
+  }
+  scene(frame: Frame): SkyScene {
+    return {
+      sprites: this.sprites,
+      count: this.count,
+      horizon: horizonLine(this.width, this.height, frame.tilt, frame.bank * 0.5),
+      width: this.width,
+      height: this.height,
+    };
   }
 }

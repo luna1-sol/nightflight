@@ -9,3 +9,4 @@
 button,#sky{-webkit-tap-highlight-color:transparent}@media(max-width:520px){input{font-size:16px}}
 
 .attribution{text-align:right}.build-version{font-size:9px;line-height:12px;color:#a0b1a9;letter-spacing:.025em}
+.settings{width:min(380px,calc(100vw - 30px))}.setting-row{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:14px 0;border-top:1px solid var(--edge);font-size:11px;cursor:pointer}.setting-row span{display:flex;flex-direction:column;gap:5px}.setting-row small{font-size:9px;color:var(--dim);line-height:1.5}.setting-row input[type=checkbox]{width:18px;height:18px;flex-shrink:0;padding:0;accent-color:#c4d8c9;cursor:pointer}

@@ -46,8 +46,13 @@ const COMPOSITE = `#version 300 es
 precision highp float;
 uniform sampler2D u_light;
 uniform sampler2D u_bloom;
+uniform sampler2D u_wide;
 uniform float u_strength;
 uniform float u_exposure;
+uniform vec3 u_horizon;   // A·x + B·y + C <= 0 is sky (CSS px, y down)
+uniform vec2 u_css;       // viewport size in CSS px
+uniform float u_glow;     // skyglow strength (0 = off)
+uniform float u_glow_height;
 in vec2 v_uv;
 out vec4 color;
 // Linear below the knee, so single lights keep their designed brightness;
@@ -63,7 +68,40 @@ float noise(vec2 p) {
 void main() {
   vec3 light = texture(u_light, v_uv).rgb;
   vec3 bloom = texture(u_bloom, v_uv).rgb;
-  vec3 c = knee((light + bloom * u_strength) * u_exposure);
+  vec3 c = light + bloom * u_strength;
+  // Skyglow: city light scattered by the air over the horizon. Look
+  // straight "down" from this pixel through the widest blur and keep the
+  // brightest city light found, weakened by how far below it is, so bright
+  // districts raise a warm dome. The map's lit ground ends somewhat below
+  // the geometric horizon, hence the search instead of a single sample.
+  // It fades out below the horizon so nearby streets do not smear upwards.
+  if (u_glow > 0.0) {
+    vec2 css = vec2(v_uv.x, 1.0 - v_uv.y) * u_css;
+    float d = dot(u_horizon.xy, css) + u_horizon.z;
+    float fade = 1.0 - smoothstep(0.0, 0.12 * u_css.y, d);
+    if (fade > 0.0) {
+      // ∫ city(below) · e^(−distance / height) along the downward normal.
+      // Three taps along the horizon at each step spread it sideways too.
+      const int STEPS = 10;
+      float step = 0.019 * u_css.y;
+      vec2 down = u_horizon.xy, side = vec2(-down.y, down.x) * 0.035 * u_css.x;
+      vec3 dome = vec3(0.0);
+      for (int k = 0; k < STEPS; k++) {
+        float off = (float(k) + 0.5) * step;
+        vec2 q = css + down * off;
+        vec3 sum = vec3(0.0);
+        for (int j = -1; j <= 1; j++) {
+          vec2 p = q + side * float(j);
+          vec2 quv = clamp(vec2(p.x / u_css.x, 1.0 - p.y / u_css.y), 0.0, 1.0);
+          sum += texture(u_wide, quv).rgb;
+        }
+        dome += sum / 3.0 * exp(-off / u_glow_height);
+      }
+      dome *= step / u_glow_height;
+      c += dome * vec3(1.0, 0.82, 0.62) * u_glow * fade;
+    }
+  }
+  c = knee(c * u_exposure);
   // Dither: the faint, wide glow would otherwise band in 8-bit output.
   c += (noise(gl_FragCoord.xy) - 0.5) / 255.0;
   color = vec4(max(c, 0.0), 0.0);
@@ -81,6 +119,13 @@ export interface BloomSettings {
   exposure: number;
 }
 
+export interface Skyglow {
+  horizon: readonly [number, number, number];
+  width: number;
+  height: number;
+  strength: number;
+}
+
 export class LightBloom {
   private gl: WebGL2RenderingContext;
   private down: WebGLProgram;
@@ -90,7 +135,15 @@ export class LightBloom {
   private downU: Record<"u_src" | "u_texel", WebGLUniformLocation | null>;
   private upU: Record<"u_src" | "u_texel" | "u_weight", WebGLUniformLocation | null>;
   private compositeU: Record<
-    "u_light" | "u_bloom" | "u_strength" | "u_exposure",
+    | "u_light"
+    | "u_bloom"
+    | "u_wide"
+    | "u_strength"
+    | "u_exposure"
+    | "u_horizon"
+    | "u_css"
+    | "u_glow"
+    | "u_glow_height",
     WebGLUniformLocation | null
   >;
   private format: { internal: number; type: number };
@@ -111,8 +164,13 @@ export class LightBloom {
     this.compositeU = uniforms(gl, this.composite, [
       "u_light",
       "u_bloom",
+      "u_wide",
       "u_strength",
       "u_exposure",
+      "u_horizon",
+      "u_css",
+      "u_glow",
+      "u_glow_height",
     ]);
     // Half floats keep the sum of many overlapping lights; 8-bit still works
     // but clips dense areas before the tone curve can soften them.
@@ -208,6 +266,7 @@ export class LightBloom {
     output: WebGLFramebuffer | null,
     viewport: Int32Array,
     { strength, exposure }: BloomSettings,
+    skyglow: Skyglow | null = null,
   ): void {
     const gl = this.gl,
       light = this.light!,
@@ -239,10 +298,21 @@ export class LightBloom {
     gl.bindTexture(gl.TEXTURE_2D, light.texture);
     gl.activeTexture(gl.TEXTURE1);
     gl.bindTexture(gl.TEXTURE_2D, levels[0].texture);
-    gl.uniform1i(this.compositeU.u_light, 0);
-    gl.uniform1i(this.compositeU.u_bloom, 1);
-    gl.uniform1f(this.compositeU.u_strength, strength / levels.length);
-    gl.uniform1f(this.compositeU.u_exposure, exposure);
+    gl.activeTexture(gl.TEXTURE2);
+    // 1/16 size, holding its own and the blurrier level: broad but not blocky.
+    gl.bindTexture(gl.TEXTURE_2D, levels[Math.min(3, levels.length - 1)].texture);
+    const u = this.compositeU;
+    gl.uniform1i(u.u_light, 0);
+    gl.uniform1i(u.u_bloom, 1);
+    gl.uniform1i(u.u_wide, 2);
+    gl.uniform1f(u.u_strength, strength / levels.length);
+    gl.uniform1f(u.u_exposure, exposure);
+    gl.uniform1f(u.u_glow, skyglow?.strength ?? 0);
+    if (skyglow) {
+      gl.uniform3f(u.u_horizon, ...skyglow.horizon);
+      gl.uniform2f(u.u_css, skyglow.width, skyglow.height);
+      gl.uniform1f(u.u_glow_height, Math.max(1, skyglow.height * 0.07));
+    }
     gl.blendFunc(gl.ONE, gl.ONE); // light adds onto the dark map
     gl.drawArrays(gl.TRIANGLES, 0, 3);
     gl.activeTexture(gl.TEXTURE0);

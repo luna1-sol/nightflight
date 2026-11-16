@@ -12,13 +12,17 @@
     "build": "tsc && vite build",
     "preview": "vite preview",
     "typecheck": "tsc",
-    "test": "node --test \"tests/**/*.test.ts\""
+    "test": "node --test \"tests/**/*.test.ts\"",
+    "test:e2e": "playwright test"
   },
   "dependencies": {
     "maplibre-gl": "6.16.0"
   },
   "devDependencies": {
+    "@playwright/test": "1.65.1",
     "@types/node": "26.6.6",
+    "@types/pngjs": "6.0.5",
+    "pngjs": "7.0.0",
     "typescript": "7.0.2",
     "vite": "8.3.8"
   }

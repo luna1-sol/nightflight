@@ -25,3 +25,24 @@ jobs:
       - run: npm ci
       - run: npm test
       - run: npm run build
+
+  browser:
+    # Loads the built site in headless Chromium (software WebGL) and checks
+    # that lights draw, survive a WebGL context loss, keep going across the
+    # date line, and that display settings apply. Needs the public map tiles.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+      - run: npm run test:e2e
+      - if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-traces
+          path: test-results/
+          retention-days: 7
